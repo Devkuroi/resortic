@@ -3,21 +3,24 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\Hash;
 
 class User extends Model
 {
-    protected $fillable = [
-        'name',
-        'email',
-        'password',
-        'role',
-        'status',
-    ];
+    protected $fillable = ['name', 'email', 'password', 'role', 'status'];
+    protected $hidden   = ['password'];
 
-    protected $hidden = ['password'];
+    public function rooms(): HasMany
+    {
+        return $this->hasMany(Room::class, 'hotel_id');
+    }
 
-    // Etiquetas legibles para rol
+    public function reservations(): HasMany
+    {
+        return $this->hasMany(Reservation::class, 'client_id');
+    }
+
     public function getRoleLabelAttribute(): string
     {
         return match ($this->role) {
@@ -28,13 +31,11 @@ class User extends Model
         };
     }
 
-    // Etiqueta legible para estado
     public function getStatusLabelAttribute(): string
     {
         return $this->status === 'active' ? 'Activo' : 'Inactivo';
     }
 
-    // Badge Bootstrap para rol
     public function getRoleBadgeAttribute(): string
     {
         return match ($this->role) {
@@ -45,7 +46,6 @@ class User extends Model
         };
     }
 
-    // Badge Bootstrap para estado
     public function getStatusBadgeAttribute(): string
     {
         return $this->status === 'active' ? 'success' : 'secondary';

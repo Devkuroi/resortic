@@ -1,58 +1,179 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# RESORTIC – Plataforma de Gestión de Reservas Hoteleras
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Sistema web desarrollado en **Laravel 11** + **MySQL** + **Bootstrap 5**.
 
-## About Laravel
+## Requisitos
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+- PHP >= 8.2
+- Composer
+- MySQL 5.7+ o MariaDB 10.4+
+- Laravel 11
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+---
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+## Instalación paso a paso
 
-## Learning Laravel
-
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
-
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
-
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
-
-## Agentic Development
-
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
+### 1. Crear proyecto Laravel
 
 ```bash
-composer require laravel/boost --dev
-
-php artisan boost:install
+composer create-project laravel/laravel resortic
+cd resortic
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+### 2. Copiar los archivos del proyecto
 
-## Contributing
+Reemplaza / copia los archivos entregados en sus rutas correspondientes:
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+```
+app/
+  Http/Controllers/
+    AuthController.php
+    AccountController.php
+  Models/
+    User.php
 
-## Code of Conduct
+database/
+  migrations/
+    2024_01_01_000001_create_users_table.php
+  seeders/
+    DatabaseSeeder.php
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+resources/views/
+  layouts/
+    app.blade.php
+  auth/
+    login.blade.php
+  accounts/
+    index.blade.php
+    create.blade.php
+    edit.blade.php
 
-## Security Vulnerabilities
+routes/
+  web.php
+```
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+> **Importante:** reemplaza también `routes/web.php` con el archivo entregado.
 
-## License
+---
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+### 3. Configurar base de datos
+
+Crea la base de datos en MySQL:
+
+```sql
+CREATE DATABASE resortic CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
+
+Copia el archivo de entorno:
+
+```bash
+cp .env.example .env
+```
+
+Edita `.env` con tus credenciales:
+
+```env
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=resortic
+DB_USERNAME=root
+DB_PASSWORD=tu_contraseña
+```
+
+---
+
+### 4. Generar clave de la aplicación
+
+```bash
+php artisan key:generate
+```
+
+---
+
+### 5. Ejecutar migraciones y seeders
+
+```bash
+php artisan migrate --seed
+```
+
+Esto crea la tabla `users` y registra 3 cuentas de prueba.
+
+---
+
+### 6. Iniciar servidor de desarrollo
+
+```bash
+php artisan serve
+```
+
+Abre en el navegador: **http://localhost:8000**
+
+---
+
+## Credenciales de prueba
+
+| Rol           | Correo                     | Contraseña   |
+|---------------|----------------------------|--------------|
+| Administrador | admin@resortic.com         | admin123     |
+| Hotel         | brisasdelmar@hotel.com     | hotel123     |
+| Cliente       | ana.garcia@gmail.com       | cliente123   |
+
+---
+
+## Estructura del proyecto
+
+```
+app/Http/Controllers/
+  AuthController.php     → Login y logout con sesión PHP
+  AccountController.php  → CRUD completo de cuentas
+
+app/Models/
+  User.php               → Modelo con accessors para badges y etiquetas
+
+database/migrations/
+  *_create_users_table   → Tabla users: id, name, email, password, role, status
+
+resources/views/
+  layouts/app.blade.php  → Layout principal con navbar y sidebar
+  auth/login.blade.php   → Formulario de inicio de sesión
+  accounts/index.blade   → Listado con estadísticas, filtros y paginación
+  accounts/create.blade  → Formulario de creación
+  accounts/edit.blade    → Formulario de edición
+
+routes/web.php           → Rutas: login, logout, resource accounts
+```
+
+---
+
+## Funcionalidades implementadas
+
+### Autenticación (RF3)
+- Inicio de sesión con email y contraseña
+- Verificación contra base de datos con `Hash::check()`
+- Sesión PHP nativa (sin Sanctum ni Breeze)
+- Cierre de sesión
+- Protección de rutas: redirige a login si no hay sesión activa
+- Bloqueo de cuentas inactivas
+
+### CRUD de Cuentas (RF1, RF2)
+- **Crear** cuenta con validación completa
+- **Listar** con estadísticas, búsqueda y filtros por rol/estado
+- **Editar** con cambio de contraseña opcional
+- **Eliminar** con confirmación (protege que el admin no se elimine a sí mismo)
+- Paginación de 10 registros por página
+- Mensajes flash de éxito/error
+
+### Roles del sistema
+- `admin` → Administrador
+- `hotel` → Hotel
+- `client` → Cliente
+
+---
+
+## Próximos módulos a implementar
+
+- RF4/RF5/RF6: Gestión de habitaciones
+- RF7/RF8: Consulta de disponibilidad y reservas
+- RF10: Pasarela de pagos
+- RF11: Control contable
