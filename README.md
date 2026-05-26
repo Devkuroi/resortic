@@ -13,14 +13,7 @@ Sistema web desarrollado en **Laravel 11** + **MySQL** + **Bootstrap 5**.
 
 ## Instalación paso a paso
 
-### 1. Crear proyecto Laravel
-
-```bash
-composer create-project laravel/laravel resortic
-cd resortic
-```
-
-### 2. Copiar los archivos del proyecto
+### 1. Copiar los archivos del proyecto
 
 Reemplaza / copia los archivos entregados en sus rutas correspondientes:
 
@@ -50,9 +43,6 @@ resources/views/
 
 routes/
   web.php
-```
-
-> **Importante:** reemplaza también `routes/web.php` con el archivo entregado.
 
 ---
 
@@ -83,7 +73,7 @@ DB_PASSWORD=tu_contraseña
 
 ---
 
-### 4. Generar clave de la aplicación
+### 2. Generar clave de la aplicación
 
 ```bash
 php artisan key:generate
@@ -91,7 +81,7 @@ php artisan key:generate
 
 ---
 
-### 5. Ejecutar migraciones y seeders
+### 3. Ejecutar migraciones y seeders
 
 ```bash
 php artisan migrate --seed
@@ -101,7 +91,7 @@ Esto crea la tabla `users` y registra 3 cuentas de prueba.
 
 ---
 
-### 6. Iniciar servidor de desarrollo
+### 4. Iniciar servidor de desarrollo
 
 ```bash
 php artisan serve
