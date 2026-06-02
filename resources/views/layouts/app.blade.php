@@ -43,12 +43,14 @@
         </a>
         <div class="ms-auto d-flex align-items-center gap-3">
             <span class="text-white-50 small d-none d-md-inline">
-                <i class="bi bi-person-circle me-1"></i>{{ session('user_name') }}
-                <span class="badge bg-white text-primary ms-1">{{ session('user_role') === 'admin' ? 'Admin' : (session('user_role') === 'hotel' ? 'Hotel' : 'Cliente') }}</span>
+                <i class="bi bi-person-circle me-1"></i>{{ Auth::user()->name }}
+                <span class="badge bg-white text-primary ms-1">{{ Auth::user()->role_label }}</span>
             </span>
             <form action="{{ route('logout') }}" method="POST" class="mb-0">
                 @csrf
-                <button class="btn btn-outline-light btn-sm"><i class="bi bi-box-arrow-right me-1"></i>Salir</button>
+                <button class="btn btn-outline-light btn-sm">
+                    <i class="bi bi-box-arrow-right me-1"></i>Salir
+                </button>
             </form>
         </div>
     </div>
@@ -60,39 +62,48 @@
 
             {{-- Disponibilidad: todos la ven --}}
             <div class="nav-section">Búsqueda</div>
-            <a href="{{ route('reservations.availability') }}" class="nav-link {{ request()->routeIs('reservations.availability') ? 'active' : '' }}">
+            <a href="{{ route('reservations.availability') }}"
+               class="nav-link {{ request()->routeIs('reservations.availability') ? 'active' : '' }}">
                 <i class="bi bi-search"></i> Disponibilidad
             </a>
 
-            {{-- Reservas: admin, hotel y cliente --}}
+            {{-- Reservas: todos los roles pueden consultar --}}
             <div class="nav-section">Reservas</div>
-            <a href="{{ route('reservations.index') }}" class="nav-link {{ request()->routeIs('reservations.index','reservations.show','reservations.edit') ? 'active' : '' }}">
+            <a href="{{ route('reservations.index') }}"
+               class="nav-link {{ request()->routeIs('reservations.index','reservations.show') ? 'active' : '' }}">
                 <i class="bi bi-calendar-check"></i> Reservas
             </a>
-            @if(in_array(session('user_role'), ['admin','client']))
-            <a href="{{ route('reservations.create') }}" class="nav-link {{ request()->routeIs('reservations.create') ? 'active' : '' }}">
+
+            {{-- Nueva reserva: solo admin y hotel --}}
+            @if(Auth::user()->isAdmin() || Auth::user()->isHotel())
+            <a href="{{ route('reservations.create') }}"
+               class="nav-link {{ request()->routeIs('reservations.create','reservations.edit') ? 'active' : '' }}">
                 <i class="bi bi-plus-circle"></i> Nueva reserva
             </a>
             @endif
 
             {{-- Habitaciones: admin y hotel --}}
-            @if(in_array(session('user_role'), ['admin','hotel']))
+            @if(Auth::user()->isAdmin() || Auth::user()->isHotel())
             <div class="nav-section">Habitaciones</div>
-            <a href="{{ route('rooms.index') }}" class="nav-link {{ request()->routeIs('rooms.index','rooms.edit') ? 'active' : '' }}">
+            <a href="{{ route('rooms.index') }}"
+               class="nav-link {{ request()->routeIs('rooms.index','rooms.edit') ? 'active' : '' }}">
                 <i class="bi bi-door-open"></i> Habitaciones
             </a>
-            <a href="{{ route('rooms.create') }}" class="nav-link {{ request()->routeIs('rooms.create') ? 'active' : '' }}">
+            <a href="{{ route('rooms.create') }}"
+               class="nav-link {{ request()->routeIs('rooms.create') ? 'active' : '' }}">
                 <i class="bi bi-plus-circle"></i> Nueva habitación
             </a>
             @endif
 
             {{-- Cuentas: solo admin --}}
-            @if(session('user_role') === 'admin')
+            @if(Auth::user()->isAdmin())
             <div class="nav-section">Administración</div>
-            <a href="{{ route('accounts.index') }}" class="nav-link {{ request()->routeIs('accounts.*') ? 'active' : '' }}">
+            <a href="{{ route('accounts.index') }}"
+               class="nav-link {{ request()->routeIs('accounts.*') ? 'active' : '' }}">
                 <i class="bi bi-people"></i> Cuentas
             </a>
             @endif
+
         </div>
     </div>
 

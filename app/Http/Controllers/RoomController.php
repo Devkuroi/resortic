@@ -4,34 +4,26 @@ namespace App\Http\Controllers;
 
 use App\Models\Room;
 use App\Models\User;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\View\View;
 
 class RoomController extends Controller
 {
-    private function checkSession(): void
+    public function index(Request $request): View
     {
-        if (!session()->has('user_id')) {
-            abort(redirect()->route('login'));
-        }
-    }
+        $this->authorize('viewAny', Room::class);
 
-    // RF4, RF7: Listar habitaciones con filtros y disponibilidad
-    public function index(Request $request)
-    {
-        $this->checkSession();
-
-        $role    = session('user_role');
-        $userId  = session('user_id');
-
+        /** @var \App\Models\User $user */
+        $user  = Auth::user();
         $query = Room::with('hotel');
 
-        // Hotel solo ve sus propias habitaciones
-        if ($role === 'hotel') {
-            $query->where('hotel_id', $userId);
+        if ($user->isHotel()) {
+            $query->forHotel($user->id);
         }
 
-        // Filtros
-        if ($request->filled('hotel_id') && $role === 'admin') {
+        if ($request->filled('hotel_id') && $user->isAdmin()) {
             $query->where('hotel_id', $request->hotel_id);
         }
         if ($request->filled('type')) {
@@ -47,130 +39,104 @@ class RoomController extends Controller
             $query->where('capacity', '>=', $request->capacity);
         }
 
-        $rooms  = $query->orderBy('created_at', 'desc')->paginate(10)->withQueryString();
+        $rooms  = $query->orderByDesc('created_at')->paginate(10)->withQueryString();
         $hotels = User::where('role', 'hotel')->where('status', 'active')->get();
-
-        $stats = [
-            'total'       => ($role === 'hotel') ? Room::where('hotel_id', $userId)->count() : Room::count(),
-            'available'   => ($role === 'hotel') ? Room::where('hotel_id', $userId)->where('status', 'available')->count()   : Room::where('status', 'available')->count(),
-            'occupied'    => ($role === 'hotel') ? Room::where('hotel_id', $userId)->where('status', 'occupied')->count()    : Room::where('status', 'occupied')->count(),
-            'maintenance' => ($role === 'hotel') ? Room::where('hotel_id', $userId)->where('status', 'maintenance')->count() : Room::where('status', 'maintenance')->count(),
-        ];
+        $stats  = $this->buildStats($user);
 
         return view('rooms.index', compact('rooms', 'hotels', 'stats'));
     }
 
-    // RF4: Formulario de registro de habitación
-    public function create()
+    public function create(): View
     {
-        $this->checkSession();
-        $role   = session('user_role');
-        $hotels = ($role === 'admin') ? User::where('role', 'hotel')->where('status', 'active')->get() : collect();
+        $this->authorize('create', Room::class);
+
+        $hotels = Auth::user()->isAdmin()
+            ? User::where('role', 'hotel')->where('status', 'active')->get()
+            : collect();
+
         return view('rooms.create', compact('hotels'));
     }
 
-    // RF4: Registrar habitación
-    public function store(Request $request)
+    public function store(Request $request): RedirectResponse
     {
-        $this->checkSession();
+        $this->authorize('create', Room::class);
 
-        $hotelId = (session('user_role') === 'hotel')
-            ? session('user_id')
-            : $request->hotel_id;
+        /** @var \App\Models\User $user */
+        $user    = Auth::user();
+        $hotelId = $user->isHotel() ? $user->id : $request->hotel_id;
 
         $request->merge(['hotel_id' => $hotelId]);
+        $request->validate($this->roomRules(), $this->roomMessages());
 
-        $request->validate([
-            'hotel_id'        => 'required|exists:users,id',
-            'number'          => 'required|string|max:20',
-            'type'            => 'required|in:single,double,suite,family,deluxe',
-            'description'     => 'nullable|string|max:500',
-            'price_per_night' => 'required|numeric|min:1',
-            'capacity'        => 'required|integer|min:1|max:20',
-            'status'          => 'required|in:available,occupied,maintenance',
-        ], $this->messages());
+        $duplicate = Room::where('hotel_id', $hotelId)
+            ->where('number', $request->number)
+            ->exists();
 
-        // Verificar número único por hotel
-        $exists = Room::where('hotel_id', $hotelId)->where('number', $request->number)->exists();
-        if ($exists) {
-            return back()->withErrors(['number' => 'Ya existe una habitación con ese número en este hotel.'])->withInput();
+        if ($duplicate) {
+            return back()
+                ->withErrors(['number' => 'Ya existe una habitación con ese número en este hotel.'])
+                ->withInput();
         }
 
-        Room::create([
-            'hotel_id'        => $hotelId,
-            'number'          => $request->number,
-            'type'            => $request->type,
-            'description'     => $request->description,
-            'price_per_night' => $request->price_per_night,
-            'capacity'        => $request->capacity,
-            'status'          => $request->status,
-        ]);
+        Room::create($request->only(
+            'hotel_id', 'number', 'type', 'description', 'price_per_night', 'capacity', 'status'
+        ));
 
-        return redirect()->route('rooms.index')->with('success', 'Habitación registrada correctamente.');
+        return redirect()->route('rooms.index')
+            ->with('success', 'Habitación registrada correctamente.');
     }
 
-    // RF5: Formulario de edición
-    public function edit(Room $room)
+    public function edit(Room $room): View
     {
-        $this->checkSession();
-        $this->authorizeRoom($room);
+        $this->authorize('update', $room);
+
         $hotels = User::where('role', 'hotel')->where('status', 'active')->get();
+
         return view('rooms.edit', compact('room', 'hotels'));
     }
 
-    // RF5: Actualizar habitación
-    public function update(Request $request, Room $room)
+    public function update(Request $request, Room $room): RedirectResponse
     {
-        $this->checkSession();
-        $this->authorizeRoom($room);
+        $this->authorize('update', $room);
 
-        $request->validate([
-            'number'          => 'required|string|max:20',
-            'type'            => 'required|in:single,double,suite,family,deluxe',
-            'description'     => 'nullable|string|max:500',
-            'price_per_night' => 'required|numeric|min:1',
-            'capacity'        => 'required|integer|min:1|max:20',
-            'status'          => 'required|in:available,occupied,maintenance',
-        ], $this->messages());
+        $request->validate(
+            array_diff_key($this->roomRules(), ['hotel_id' => '']),
+            $this->roomMessages()
+        );
 
-        // Número único por hotel (excluyendo la actual)
-        $exists = Room::where('hotel_id', $room->hotel_id)
+        $duplicate = Room::where('hotel_id', $room->hotel_id)
             ->where('number', $request->number)
             ->where('id', '!=', $room->id)
             ->exists();
-        if ($exists) {
-            return back()->withErrors(['number' => 'Ya existe otra habitación con ese número en este hotel.'])->withInput();
+
+        if ($duplicate) {
+            return back()
+                ->withErrors(['number' => 'Ya existe otra habitación con ese número en este hotel.'])
+                ->withInput();
         }
 
-        $room->update([
-            'number'          => $request->number,
-            'type'            => $request->type,
-            'description'     => $request->description,
-            'price_per_night' => $request->price_per_night,
-            'capacity'        => $request->capacity,
-            'status'          => $request->status,
-        ]);
+        $room->update($request->only(
+            'number', 'type', 'description', 'price_per_night', 'capacity', 'status'
+        ));
 
-        return redirect()->route('rooms.index')->with('success', 'Habitación actualizada correctamente.');
+        return redirect()->route('rooms.index')
+            ->with('success', 'Habitación actualizada correctamente.');
     }
 
-    // RF6: Cambiar estado rápido (AJAX-friendly)
-    public function updateStatus(Request $request, Room $room)
+    public function updateStatus(Request $request, Room $room): RedirectResponse
     {
-        $this->checkSession();
-        $this->authorizeRoom($room);
+        $this->authorize('update', $room);
 
         $request->validate(['status' => 'required|in:available,occupied,maintenance']);
+
         $room->update(['status' => $request->status]);
 
-        return redirect()->back()->with('success', 'Estado de la habitación actualizado.');
+        return back()->with('success', 'Estado de la habitación actualizado.');
     }
 
-    // Eliminar habitación
-    public function destroy(Room $room)
+    public function destroy(Room $room): RedirectResponse
     {
-        $this->checkSession();
-        $this->authorizeRoom($room);
+        $this->authorize('delete', $room);
 
         if ($room->reservations()->whereIn('status', ['pending', 'confirmed'])->exists()) {
             return redirect()->route('rooms.index')
@@ -178,18 +144,43 @@ class RoomController extends Controller
         }
 
         $room->delete();
-        return redirect()->route('rooms.index')->with('success', 'Habitación eliminada correctamente.');
+
+        return redirect()->route('rooms.index')
+            ->with('success', 'Habitación eliminada correctamente.');
     }
 
-    // Protege que un hotel no edite habitaciones ajenas
-    private function authorizeRoom(Room $room): void
+    /* ── Helpers privados ───────────────────────── */
+
+    private function buildStats(User $user): array
     {
-        if (session('user_role') === 'hotel' && $room->hotel_id !== session('user_id')) {
-            abort(403, 'No tienes permiso para gestionar esta habitación.');
+        $base = Room::query();
+
+        if ($user->isHotel()) {
+            $base->forHotel($user->id);
         }
+
+        return [
+            'total'       => (clone $base)->count(),
+            'available'   => (clone $base)->where('status', 'available')->count(),
+            'occupied'    => (clone $base)->where('status', 'occupied')->count(),
+            'maintenance' => (clone $base)->where('status', 'maintenance')->count(),
+        ];
     }
 
-    private function messages(): array
+    private function roomRules(): array
+    {
+        return [
+            'hotel_id'        => 'required|exists:users,id',
+            'number'          => 'required|string|max:20',
+            'type'            => 'required|in:single,double,suite,family,deluxe',
+            'description'     => 'nullable|string|max:500',
+            'price_per_night' => 'required|numeric|min:1',
+            'capacity'        => 'required|integer|min:1|max:20',
+            'status'          => 'required|in:available,occupied,maintenance',
+        ];
+    }
+
+    private function roomMessages(): array
     {
         return [
             'hotel_id.required'        => 'Debes seleccionar un hotel.',

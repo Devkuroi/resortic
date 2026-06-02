@@ -4,7 +4,7 @@
 @section('content')
 <div class="page-header">
     <h4><i class="bi bi-calendar-plus me-2"></i>Nueva Reserva</h4>
-    <p>Realiza una reserva de habitación (RF8).</p>
+    <p>Realiza una reserva de habitación.</p>
 </div>
 
 <div class="row justify-content-center">
@@ -27,6 +27,12 @@
 {{-- Selección de habitación --}}
 <div class="mb-3">
     <label class="form-label fw-semibold small">Habitación <span class="text-danger">*</span></label>
+    @if(Auth::user()->isHotel())
+        <p class="text-muted small mb-1">
+            <i class="bi bi-info-circle me-1"></i>
+            Solo se muestran las habitaciones disponibles de tu hotel.
+        </p>
+    @endif
     <select name="room_id" id="room_id" class="form-select @error('room_id') is-invalid @enderror"
             onchange="updatePrice()">
         <option value="">Selecciona una habitación...</option>
@@ -35,21 +41,26 @@
                     data-price="{{ $r->price_per_night }}"
                     data-capacity="{{ $r->capacity }}"
                     {{ old('room_id', $selectedRoom?->id) == $r->id ? 'selected' : '' }}>
-                [{{ $r->hotel->name ?? '—' }}] Hab. {{ $r->number }} – {{ $r->type_label }} – ${{ number_format($r->price_per_night,0,',','.') }}/noche ({{ $r->capacity }} pers.)
+                @if(!Auth::user()->isHotel())
+                    [{{ $r->hotel->name ?? '—' }}]
+                @endif
+                Hab. {{ $r->number }} – {{ $r->type_label }} – ${{ number_format($r->price_per_night,0,',','.') }}/noche ({{ $r->capacity }} pers.)
             </option>
         @endforeach
     </select>
     @error('room_id')<div class="invalid-feedback">{{ $message }}</div>@enderror
 </div>
 
-{{-- Cliente (solo admin y hotel lo seleccionan; cliente es fijo) --}}
-@if(in_array(session('user_role'), ['admin','hotel']))
+{{-- Cliente: admin y hotel seleccionan; cliente es fijo --}}
+@if(Auth::user()->isAdmin() || Auth::user()->isHotel())
 <div class="mb-3">
     <label class="form-label fw-semibold small">Cliente <span class="text-danger">*</span></label>
     <select name="client_id" class="form-select @error('client_id') is-invalid @enderror">
         <option value="">Selecciona un cliente...</option>
         @foreach($clients as $c)
-            <option value="{{ $c->id }}" {{ old('client_id') == $c->id ? 'selected':'' }}>{{ $c->name }} ({{ $c->email }})</option>
+            <option value="{{ $c->id }}" {{ old('client_id') == $c->id ? 'selected' : '' }}>
+                {{ $c->name }} ({{ $c->email }})
+            </option>
         @endforeach
     </select>
     @error('client_id')<div class="invalid-feedback">{{ $message }}</div>@enderror
@@ -57,8 +68,7 @@
 @else
 <div class="mb-3">
     <label class="form-label fw-semibold small">Cliente</label>
-    <input type="text" class="form-control bg-light" value="{{ session('user_name') }}" disabled>
-    <input type="hidden" name="client_id" value="{{ session('user_id') }}">
+    <input type="text" class="form-control bg-light" value="{{ Auth::user()->name }}" disabled>
 </div>
 @endif
 
@@ -92,11 +102,13 @@
 
 <div class="mb-3">
     <label class="form-label fw-semibold small">Notas adicionales</label>
-    <textarea name="notes" rows="2" class="form-control" placeholder="Peticiones especiales, alergias, hora de llegada...">{{ old('notes') }}</textarea>
+    <textarea name="notes" rows="2" class="form-control"
+              placeholder="Peticiones especiales, alergias, hora de llegada...">{{ old('notes') }}</textarea>
 </div>
 
 {{-- Resumen de precio --}}
-<div class="card bg-light border-0 mb-4" id="price-summary" style="{{ ($checkIn && $checkOut) ? '' : 'display:none' }}">
+<div class="card bg-light border-0 mb-4" id="price-summary"
+     style="{{ ($checkIn && $checkOut) ? '' : 'display:none' }}">
     <div class="card-body py-3">
         <div class="d-flex justify-content-between align-items-center">
             <span class="fw-semibold">Resumen del costo</span>
@@ -118,7 +130,7 @@
 </div>
 
 <div class="d-flex gap-2 justify-content-end">
-    <a href="{{ route('reservations.availability') }}" class="btn btn-outline-secondary">
+    <a href="{{ route('reservations.index') }}" class="btn btn-outline-secondary">
         <i class="bi bi-arrow-left me-1"></i>Cancelar
     </a>
     <button type="submit" class="btn btn-primary">
@@ -136,31 +148,27 @@
 @push('scripts')
 <script>
 function updatePrice() {
-    const select  = document.getElementById('room_id');
-    const checkIn = document.getElementById('check_in').value;
+    const select   = document.getElementById('room_id');
+    const checkIn  = document.getElementById('check_in').value;
     const checkOut = document.getElementById('check_out').value;
-    const summary = document.getElementById('price-summary');
+    const summary  = document.getElementById('price-summary');
 
     if (!select.value || !checkIn || !checkOut) { summary.style.display = 'none'; return; }
 
-    const opt      = select.options[select.selectedIndex];
-    const price    = parseFloat(opt.dataset.price);
-    const d1       = new Date(checkIn);
-    const d2       = new Date(checkOut);
-    const nights   = Math.round((d2 - d1) / 86400000);
+    const opt    = select.options[select.selectedIndex];
+    const price  = parseFloat(opt.dataset.price);
+    const nights = Math.round((new Date(checkOut) - new Date(checkIn)) / 86400000);
 
     if (nights <= 0) { summary.style.display = 'none'; return; }
 
-    const total = price * nights;
     document.getElementById('price-night').textContent  = '$' + price.toLocaleString('es-CO');
     document.getElementById('price-nights').textContent = nights;
-    document.getElementById('price-total').textContent  = '$' + total.toLocaleString('es-CO');
+    document.getElementById('price-total').textContent  = '$' + (price * nights).toLocaleString('es-CO');
     summary.style.display = 'block';
 }
 
-// Validar fecha de salida siempre posterior a entrada
-document.getElementById('check_in').addEventListener('change', function() {
-    const co = document.getElementById('check_out');
+document.getElementById('check_in').addEventListener('change', function () {
+    const co   = document.getElementById('check_out');
     const next = new Date(this.value);
     next.setDate(next.getDate() + 1);
     const nextStr = next.toISOString().split('T')[0];
@@ -169,7 +177,6 @@ document.getElementById('check_in').addEventListener('change', function() {
     updatePrice();
 });
 
-// Inicializar resumen si hay valores precargados
 updatePrice();
 </script>
 @endpush
