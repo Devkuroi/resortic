@@ -52,9 +52,6 @@
 </head>
 <body>
 
-{{-- ══════════════════════════════════════════
-     NAVBAR
-══════════════════════════════════════════ --}}
 <nav class="navbar navbar-expand-lg navbar-dark bg-primary sticky-top">
     <div class="container-fluid px-3">
 
@@ -85,10 +82,6 @@
         </div>
     </div>
 </nav>
-
-{{-- ══════════════════════════════════════════
-     OFFCANVAS SIDEBAR (mobile) — sin data-bs-dismiss en los links
-══════════════════════════════════════════ --}}
 <div class="offcanvas offcanvas-start offcanvas-sidebar" tabindex="-1" id="sidebarOffcanvas" aria-labelledby="sidebarOffcanvasLabel">
     <div class="offcanvas-header border-bottom">
         <div>
@@ -144,12 +137,8 @@
     </div>
 </div>
 
-{{-- ══════════════════════════════════════════
-     LAYOUT PRINCIPAL
-══════════════════════════════════════════ --}}
 <div class="d-flex">
 
-    {{-- Sidebar desktop (oculto en móvil) --}}
     <div class="sidebar d-none d-md-block">
         <div class="py-2">
             <div class="nav-section">Búsqueda</div>
