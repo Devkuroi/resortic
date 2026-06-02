@@ -3,26 +3,17 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\View\View;
 
 class AccountController extends Controller
 {
-    // Middleware manual: verificar sesión en cada método
-    private function checkSession()
+    public function index(Request $request): View
     {
-        if (!session()->has('user_id')) {
-            abort(redirect()->route('login')->with('error', 'Debes iniciar sesión.'));
-        }
-    }
-
-    public function index(Request $request)
-    {
-        $this->checkSession();
-
         $query = User::query();
 
-        // Filtro por búsqueda
         if ($request->filled('search')) {
             $search = $request->search;
             $query->where(function ($q) use ($search) {
@@ -31,46 +22,97 @@ class AccountController extends Controller
             });
         }
 
-        // Filtro por rol
         if ($request->filled('role')) {
             $query->where('role', $request->role);
         }
 
-        // Filtro por estado
         if ($request->filled('status')) {
             $query->where('status', $request->status);
         }
 
-        $accounts = $query->orderBy('created_at', 'desc')->paginate(10)->withQueryString();
+        $accounts = $query->orderByDesc('created_at')->paginate(10)->withQueryString();
 
-        // Estadísticas
         $stats = [
-            'total'    => User::count(),
-            'active'   => User::where('status', 'active')->count(),
-            'hotels'   => User::where('role', 'hotel')->count(),
-            'clients'  => User::where('role', 'client')->count(),
+            'total'   => User::count(),
+            'active'  => User::where('status', 'active')->count(),
+            'hotels'  => User::where('role', 'hotel')->count(),
+            'clients' => User::where('role', 'client')->count(),
         ];
 
         return view('accounts.index', compact('accounts', 'stats'));
     }
 
-    public function create()
+    public function create(): View
     {
-        $this->checkSession();
         return view('accounts.create');
     }
 
-    public function store(Request $request)
+    public function store(Request $request): RedirectResponse
     {
-        $this->checkSession();
-
         $request->validate([
             'name'     => 'required|string|max:100',
             'email'    => 'required|email|unique:users,email',
             'password' => 'required|min:6|confirmed',
             'role'     => 'required|in:admin,hotel,client',
             'status'   => 'required|in:active,inactive',
-        ], [
+        ], $this->validationMessages());
+
+        User::create($request->only('name', 'email', 'password', 'role', 'status'));
+
+        return redirect()->route('accounts.index')
+            ->with('success', 'Cuenta creada exitosamente.');
+    }
+
+    public function edit(User $account): View
+    {
+        return view('accounts.edit', compact('account'));
+    }
+
+    public function update(Request $request, User $account): RedirectResponse
+    {
+        $rules = [
+            'name'   => 'required|string|max:100',
+            'email'  => "required|email|unique:users,email,{$account->id}",
+            'role'   => 'required|in:admin,hotel,client',
+            'status' => 'required|in:active,inactive',
+        ];
+
+        if ($request->filled('password')) {
+            $rules['password'] = 'min:6|confirmed';
+        }
+
+        $request->validate($rules, $this->validationMessages());
+
+        $data = $request->only('name', 'email', 'role', 'status');
+
+        if ($request->filled('password')) {
+            $data['password'] = $request->password; // cast 'hashed' lo encripta
+        }
+
+        $account->update($data);
+
+        return redirect()->route('accounts.index')
+            ->with('success', 'Cuenta actualizada correctamente.');
+    }
+
+    public function destroy(User $account): RedirectResponse
+    {
+        if ($account->is(Auth::user())) {
+            return redirect()->route('accounts.index')
+                ->with('error', 'No puedes eliminar tu propia cuenta.');
+        }
+
+        $account->delete();
+
+        return redirect()->route('accounts.index')
+            ->with('success', 'Cuenta eliminada correctamente.');
+    }
+
+    /* ── Helpers privados ───────────────────────── */
+
+    private function validationMessages(): array
+    {
+        return [
             'name.required'      => 'El nombre es obligatorio.',
             'email.required'     => 'El correo es obligatorio.',
             'email.unique'       => 'Este correo ya está registrado.',
@@ -79,79 +121,6 @@ class AccountController extends Controller
             'password.confirmed' => 'Las contraseñas no coinciden.',
             'role.required'      => 'El rol es obligatorio.',
             'status.required'    => 'El estado es obligatorio.',
-        ]);
-
-        User::create([
-            'name'     => $request->name,
-            'email'    => $request->email,
-            'password' => Hash::make($request->password),
-            'role'     => $request->role,
-            'status'   => $request->status,
-        ]);
-
-        return redirect()->route('accounts.index')->with('success', 'Cuenta creada exitosamente.');
-    }
-
-    public function edit(User $account)
-    {
-        $this->checkSession();
-        return view('accounts.edit', compact('account'));
-    }
-
-    public function update(Request $request, User $account)
-    {
-        $this->checkSession();
-
-        $rules = [
-            'name'   => 'required|string|max:100',
-            'email'  => 'required|email|unique:users,email,' . $account->id,
-            'role'   => 'required|in:admin,hotel,client',
-            'status' => 'required|in:active,inactive',
         ];
-
-        $messages = [
-            'name.required'  => 'El nombre es obligatorio.',
-            'email.required' => 'El correo es obligatorio.',
-            'email.unique'   => 'Este correo ya está registrado por otra cuenta.',
-            'role.required'  => 'El rol es obligatorio.',
-            'status.required'=> 'El estado es obligatorio.',
-        ];
-
-        // Contraseña opcional en edición
-        if ($request->filled('password')) {
-            $rules['password'] = 'min:6|confirmed';
-            $messages['password.min']       = 'La contraseña debe tener al menos 6 caracteres.';
-            $messages['password.confirmed'] = 'Las contraseñas no coinciden.';
-        }
-
-        $request->validate($rules, $messages);
-
-        $data = [
-            'name'   => $request->name,
-            'email'  => $request->email,
-            'role'   => $request->role,
-            'status' => $request->status,
-        ];
-
-        if ($request->filled('password')) {
-            $data['password'] = Hash::make($request->password);
-        }
-
-        $account->update($data);
-
-        return redirect()->route('accounts.index')->with('success', 'Cuenta actualizada correctamente.');
-    }
-
-    public function destroy(User $account)
-    {
-        $this->checkSession();
-
-        // Evitar que el admin se elimine a sí mismo
-        if ($account->id === session('user_id')) {
-            return redirect()->route('accounts.index')->with('error', 'No puedes eliminar tu propia cuenta.');
-        }
-
-        $account->delete();
-        return redirect()->route('accounts.index')->with('success', 'Cuenta eliminada correctamente.');
     }
 }

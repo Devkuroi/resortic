@@ -2,9 +2,9 @@
 
 namespace App\Models;
 
+use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Carbon\Carbon;
 
 class Reservation extends Model
 {
@@ -39,6 +39,11 @@ class Reservation extends Model
 
     /* ── Accessors ──────────────────────────────── */
 
+    public function getNightsAttribute(): int
+    {
+        return $this->check_in->diffInDays($this->check_out);
+    }
+
     public function getStatusLabelAttribute(): string
     {
         return match ($this->status) {
@@ -61,8 +66,15 @@ class Reservation extends Model
         };
     }
 
-    public function getNightsAttribute(): int
+    /* ── Helpers de estado ──────────────────────── */
+
+    public function isCancellable(): bool
     {
-        return $this->check_in->diffInDays($this->check_out);
+        return ! in_array($this->status, ['completed', 'cancelled']);
+    }
+
+    public function isEditable(): bool
+    {
+        return ! in_array($this->status, ['completed', 'cancelled']);
     }
 }

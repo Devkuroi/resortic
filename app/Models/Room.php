@@ -35,17 +35,29 @@ class Room extends Model
         return $this->hasMany(Reservation::class);
     }
 
+    /* ── Scopes ─────────────────────────────────── */
+
+    public function scopeAvailable($query)
+    {
+        return $query->where('status', 'available');
+    }
+
+    public function scopeForHotel($query, int $hotelId)
+    {
+        return $query->where('hotel_id', $hotelId);
+    }
+
     /* ── Accessors ──────────────────────────────── */
 
     public function getTypeLabelAttribute(): string
     {
         return match ($this->type) {
-            'single'  => 'Sencilla',
-            'double'  => 'Doble',
-            'suite'   => 'Suite',
-            'family'  => 'Familiar',
-            'deluxe'  => 'Deluxe',
-            default   => ucfirst($this->type),
+            'single' => 'Sencilla',
+            'double' => 'Doble',
+            'suite'  => 'Suite',
+            'family' => 'Familiar',
+            'deluxe' => 'Deluxe',
+            default  => ucfirst($this->type),
         };
     }
 
@@ -69,34 +81,27 @@ class Room extends Model
         };
     }
 
-    /* ── Scopes ─────────────────────────────────── */
-
-    public function scopeAvailable($query)
-    {
-        return $query->where('status', 'available');
-    }
+    /* ── Lógica de dominio ──────────────────────── */
 
     /**
-     * Verifica si la habitación está libre en un rango de fechas
-     * (excluye reservas canceladas; opcionalmente excluye una reserva al editar)
+     * Verifica si la habitación está libre en un rango de fechas.
+     * Cubre todos los casos de solapamiento (parcial, completo, exacto).
+     * Excluye reservas canceladas y opcionalmente una reserva al editar.
      */
-    public function isAvailableForDates(string $checkIn, string $checkOut, ?int $excludeReservationId = null): bool
-    {
+    public function isAvailableForDates(
+        string $checkIn,
+        string $checkOut,
+        ?int $excludeReservationId = null
+    ): bool {
         $query = $this->reservations()
             ->whereNotIn('status', ['cancelled'])
-            ->where(function ($q) use ($checkIn, $checkOut) {
-                $q->whereBetween('check_in',  [$checkIn, $checkOut])
-                  ->orWhereBetween('check_out', [$checkIn, $checkOut])
-                  ->orWhere(function ($q2) use ($checkIn, $checkOut) {
-                      $q2->where('check_in',  '<=', $checkIn)
-                         ->where('check_out', '>=', $checkOut);
-                  });
-            });
+            ->where('check_in', '<', $checkOut)
+            ->where('check_out', '>', $checkIn);
 
-        if ($excludeReservationId) {
+        if ($excludeReservationId !== null) {
             $query->where('id', '!=', $excludeReservationId);
         }
 
-        return $query->count() === 0;
+        return $query->doesntExist();
     }
 }

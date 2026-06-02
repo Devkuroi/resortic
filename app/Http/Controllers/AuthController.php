@@ -2,23 +2,25 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\User;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\View\View;
 
 class AuthController extends Controller
 {
-    public function showLogin()
+    public function showLogin(): View|RedirectResponse
     {
-        // Si ya hay sesión activa, redirigir al dashboard
-        if (session()->has('user_id')) {
-            return redirect()->route('accounts.index');
+        if (Auth::check()) {
+            return redirect()->route('reservations.availability');
         }
+
         return view('auth.login');
     }
 
-    public function login(Request $request)
+    public function login(Request $request): RedirectResponse
     {
-        $request->validate([
+        $credentials = $request->validate([
             'email'    => 'required|email',
             'password' => 'required|min:6',
         ], [
@@ -28,30 +30,35 @@ class AuthController extends Controller
             'password.min'      => 'La contraseña debe tener al menos 6 caracteres.',
         ]);
 
-        $user = User::where('email', $request->email)->first();
-
-        if (!$user || !$user->verifyPassword($request->password)) {
-            return back()->withErrors(['email' => 'Credenciales incorrectas. Verifica tu correo y contraseña.'])->withInput();
+        if (! Auth::attempt($credentials)) {
+            return back()
+                ->withErrors(['email' => 'Credenciales incorrectas. Verifica tu correo y contraseña.'])
+                ->withInput();
         }
 
-        if ($user->status === 'inactive') {
-            return back()->withErrors(['email' => 'Tu cuenta está inactiva. Contacta al administrador.'])->withInput();
+        /** @var \App\Models\User $user */
+        $user = Auth::user();
+
+        if (! $user->isActive()) {
+            Auth::logout();
+            return back()
+                ->withErrors(['email' => 'Tu cuenta está inactiva. Contacta al administrador.'])
+                ->withInput();
         }
 
-        // Guardar datos en sesión
-        session([
-            'user_id'   => $user->id,
-            'user_name' => $user->name,
-            'user_role' => $user->role,
-            'user_email'=> $user->email,
-        ]);
+        $request->session()->regenerate();
 
-        return redirect()->route('accounts.index')->with('success', 'Bienvenido, ' . $user->name . '.');
+        return redirect()
+            ->intended(route('reservations.availability'))
+            ->with('success', "Bienvenido, {$user->name}.");
     }
 
-    public function logout()
+    public function logout(Request $request): RedirectResponse
     {
-        session()->flush();
+        Auth::logout();
+        $request->session()->invalidate();
+        $request->session()->regenerateToken();
+
         return redirect()->route('login')->with('success', 'Sesión cerrada correctamente.');
     }
 }
