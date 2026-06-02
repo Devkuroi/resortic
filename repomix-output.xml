@@ -50,10 +50,15 @@ app/Http/Controllers/AuthController.php
 app/Http/Controllers/Controller.php
 app/Http/Controllers/ReservationController.php
 app/Http/Controllers/RoomController.php
+app/Http/Middleware/Authenticate.php
+app/Http/Middleware/EnsureRole.php
 app/Models/Reservation.php
 app/Models/Room.php
 app/Models/User.php
+app/Policies/ReservationPolicy.php
+app/Policies/RoomPolicy.php
 app/Providers/AppServiceProvider.php
+app/Services/ReservationService.php
 artisan
 bootstrap/app.php
 bootstrap/cache/.gitignore
@@ -122,38 +127,312 @@ vite.config.js
 <files>
 This section contains the contents of the repository's files.
 
-<file path="database/migrations/2026_06_02_171108_create_sessions_table.php">
+<file path="app/Http/Middleware/Authenticate.php">
 <?php
 
-use Illuminate\Database\Migrations\Migration;
-use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\Schema;
+namespace App\Http\Middleware;
 
-return new class extends Migration
+use Closure;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Symfony\Component\HttpFoundation\Response;
+
+/**
+ * Reemplaza el patrón checkSession() manual disperso en todos los controladores.
+ * Redirige al login si no hay sesión activa de Laravel Auth.
+ */
+class Authenticate
+{
+    public function handle(Request $request, Closure $next): Response
+    {
+        if (! Auth::check()) {
+            return redirect()->route('login')
+                ->with('error', 'Debes iniciar sesión para continuar.');
+        }
+
+        if (! Auth::user()->isActive()) {
+            Auth::logout();
+            return redirect()->route('login')
+                ->with('error', 'Tu cuenta está inactiva. Contacta al administrador.');
+        }
+
+        return $next($request);
+    }
+}
+</file>
+
+<file path="app/Http/Middleware/EnsureRole.php">
+<?php
+
+namespace App\Http\Middleware;
+
+use Closure;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Symfony\Component\HttpFoundation\Response;
+
+/**
+ * Restringe el acceso a rutas según el rol del usuario autenticado.
+ *
+ * Uso en rutas:
+ *   ->middleware('role:admin')
+ *   ->middleware('role:admin,hotel')
+ */
+class EnsureRole
+{
+    public function handle(Request $request, Closure $next, string ...$roles): Response
+    {
+        $user = Auth::user();
+
+        if (! $user || ! in_array($user->role, $roles)) {
+            abort(403, 'No tienes permiso para acceder a esta sección.');
+        }
+
+        return $next($request);
+    }
+}
+</file>
+
+<file path="app/Policies/ReservationPolicy.php">
+<?php
+
+namespace App\Policies;
+
+use App\Models\Reservation;
+use App\Models\User;
+
+class ReservationPolicy
+{
+    public function viewAny(User $user): bool
+    {
+        return true; // Todos los roles ven su propia lista (filtrada en el controlador)
+    }
+
+    /**
+     * Admin ve todo. Hotel ve reservas de sus habitaciones. Cliente ve las suyas.
+     */
+    public function view(User $user, Reservation $reservation): bool
+    {
+        return match ($user->role) {
+            'admin'  => true,
+            'hotel'  => $reservation->room->hotel_id === $user->id,
+            'client' => $reservation->client_id === $user->id,
+            default  => false,
+        };
+    }
+
+    public function create(User $user): bool
+    {
+        return true; // Admin, hotel y cliente pueden crear
+    }
+
+    public function update(User $user, Reservation $reservation): bool
+    {
+        return match ($user->role) {
+            'admin'  => true,
+            'hotel'  => $reservation->room->hotel_id === $user->id,
+            'client' => false, // Clientes no editan, solo cancelan
+            default  => false,
+        };
+    }
+
+    /**
+     * Cancelar = destroy. Admin y hotel pueden cancelar cualquiera dentro de su scope.
+     * Cliente puede cancelar las suyas propias.
+     */
+    public function delete(User $user, Reservation $reservation): bool
+    {
+        return match ($user->role) {
+            'admin'  => true,
+            'hotel'  => $reservation->room->hotel_id === $user->id,
+            'client' => $reservation->client_id === $user->id,
+            default  => false,
+        };
+    }
+}
+</file>
+
+<file path="app/Policies/RoomPolicy.php">
+<?php
+
+namespace App\Policies;
+
+use App\Models\Room;
+use App\Models\User;
+
+class RoomPolicy
 {
     /**
-     * Run the migrations.
+     * Admin y hotel pueden listar. Cliente no tiene acceso a la gestión de habitaciones.
      */
-    public function up(): void
+    public function viewAny(User $user): bool
     {
-        Schema::create('sessions', function (Blueprint $table) {
-            $table->string('id')->primary();
-            $table->foreignId('user_id')->nullable()->index();
-            $table->string('ip_address', 45)->nullable();
-            $table->text('user_agent')->nullable();
-            $table->longText('payload');
-            $table->integer('last_activity')->index();
-        });
+        return in_array($user->role, ['admin', 'hotel']);
     }
 
     /**
-     * Reverse the migrations.
+     * Admin ve cualquier habitación. Hotel solo las suyas.
      */
-    public function down(): void
+    public function view(User $user, Room $room): bool
     {
-        Schema::dropIfExists('sessions');
+        return $user->isAdmin() || $room->hotel_id === $user->id;
     }
-};
+
+    public function create(User $user): bool
+    {
+        return in_array($user->role, ['admin', 'hotel']);
+    }
+
+    public function update(User $user, Room $room): bool
+    {
+        return $user->isAdmin() || $room->hotel_id === $user->id;
+    }
+
+    public function delete(User $user, Room $room): bool
+    {
+        return $user->isAdmin() || $room->hotel_id === $user->id;
+    }
+}
+</file>
+
+<file path="app/Services/ReservationService.php">
+<?php
+
+namespace App\Services;
+
+use App\Models\Reservation;
+use App\Models\Room;
+use App\Models\User;
+use Carbon\Carbon;
+use Illuminate\Validation\ValidationException;
+
+/**
+ * Encapsula toda la lógica de negocio de reservas.
+ * Los controladores delegan aquí; ellos solo validan entrada HTTP y devuelven respuestas.
+ */
+class ReservationService
+{
+    /**
+     * Crea una nueva reserva tras verificar disponibilidad y capacidad.
+     *
+     * @throws ValidationException
+     */
+    public function create(array $data, User $client): Reservation
+    {
+        $room = Room::findOrFail($data['room_id']);
+
+        $this->assertCapacity($room, (int) $data['guests']);
+        $this->assertAvailability($room, $data['check_in'], $data['check_out']);
+
+        return Reservation::create([
+            'room_id'     => $room->id,
+            'client_id'   => $client->id,
+            'check_in'    => $data['check_in'],
+            'check_out'   => $data['check_out'],
+            'guests'      => $data['guests'],
+            'total_price' => $this->calculatePrice($room, $data['check_in'], $data['check_out']),
+            'status'      => 'pending',
+            'notes'       => $data['notes'] ?? null,
+        ]);
+    }
+
+    /**
+     * Actualiza una reserva existente y sincroniza el estado de la habitación.
+     *
+     * @throws ValidationException
+     */
+    public function update(Reservation $reservation, array $data): Reservation
+    {
+        $datesChanged = $reservation->check_in->format('Y-m-d') !== $data['check_in']
+            || $reservation->check_out->format('Y-m-d') !== $data['check_out'];
+
+        if ($datesChanged) {
+            $this->assertAvailability(
+                $reservation->room,
+                $data['check_in'],
+                $data['check_out'],
+                $reservation->id
+            );
+        }
+
+        $reservation->update([
+            'check_in'    => $data['check_in'],
+            'check_out'   => $data['check_out'],
+            'guests'      => $data['guests'],
+            'total_price' => $this->calculatePrice($reservation->room, $data['check_in'], $data['check_out']),
+            'status'      => $data['status'],
+            'notes'       => $data['notes'] ?? null,
+        ]);
+
+        $this->syncRoomStatus($reservation->fresh());
+
+        return $reservation;
+    }
+
+    /**
+     * Cancela una reserva y libera la habitación.
+     *
+     * @throws ValidationException
+     */
+    public function cancel(Reservation $reservation): void
+    {
+        if (! $reservation->isCancellable()) {
+            throw ValidationException::withMessages([
+                'status' => 'No se puede cancelar una reserva ya completada.',
+            ]);
+        }
+
+        $reservation->update(['status' => 'cancelled']);
+        $reservation->room->update(['status' => 'available']);
+    }
+
+    /* ── Helpers privados ───────────────────────── */
+
+    private function calculatePrice(Room $room, string $checkIn, string $checkOut): float
+    {
+        $nights = Carbon::parse($checkIn)->diffInDays($checkOut);
+        return $nights * $room->price_per_night;
+    }
+
+    /** @throws ValidationException */
+    private function assertCapacity(Room $room, int $guests): void
+    {
+        if ($guests > $room->capacity) {
+            throw ValidationException::withMessages([
+                'guests' => "La habitación tiene capacidad máxima de {$room->capacity} personas.",
+            ]);
+        }
+    }
+
+    /** @throws ValidationException */
+    private function assertAvailability(
+        Room $room,
+        string $checkIn,
+        string $checkOut,
+        ?int $excludeId = null
+    ): void {
+        if (! $room->isAvailableForDates($checkIn, $checkOut, $excludeId)) {
+            throw ValidationException::withMessages([
+                'check_in' => 'La habitación no está disponible en las fechas seleccionadas.',
+            ]);
+        }
+    }
+
+    /**
+     * Mantiene el estado de la habitación sincronizado con el estado de la reserva.
+     * Solo actúa sobre estados que implican un cambio definitivo.
+     */
+    private function syncRoomStatus(Reservation $reservation): void
+    {
+        $room = $reservation->room;
+
+        match ($reservation->status) {
+            'confirmed'            => $room->update(['status' => 'occupied']),
+            'cancelled', 'completed' => $room->update(['status' => 'available']),
+            default                => null,
+        };
+    }
+}
 </file>
 
 <file path=".editorconfig">
@@ -300,26 +579,17 @@ audit=true
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\View\View;
 
 class AccountController extends Controller
 {
-    // Middleware manual: verificar sesión en cada método
-    private function checkSession()
+    public function index(Request $request): View
     {
-        if (!session()->has('user_id')) {
-            abort(redirect()->route('login')->with('error', 'Debes iniciar sesión.'));
-        }
-    }
-
-    public function index(Request $request)
-    {
-        $this->checkSession();
-
         $query = User::query();
 
-        // Filtro por búsqueda
         if ($request->filled('search')) {
             $search = $request->search;
             $query->where(function ($q) use ($search) {
@@ -328,46 +598,97 @@ class AccountController extends Controller
             });
         }
 
-        // Filtro por rol
         if ($request->filled('role')) {
             $query->where('role', $request->role);
         }
 
-        // Filtro por estado
         if ($request->filled('status')) {
             $query->where('status', $request->status);
         }
 
-        $accounts = $query->orderBy('created_at', 'desc')->paginate(10)->withQueryString();
+        $accounts = $query->orderByDesc('created_at')->paginate(10)->withQueryString();
 
-        // Estadísticas
         $stats = [
-            'total'    => User::count(),
-            'active'   => User::where('status', 'active')->count(),
-            'hotels'   => User::where('role', 'hotel')->count(),
-            'clients'  => User::where('role', 'client')->count(),
+            'total'   => User::count(),
+            'active'  => User::where('status', 'active')->count(),
+            'hotels'  => User::where('role', 'hotel')->count(),
+            'clients' => User::where('role', 'client')->count(),
         ];
 
         return view('accounts.index', compact('accounts', 'stats'));
     }
 
-    public function create()
+    public function create(): View
     {
-        $this->checkSession();
         return view('accounts.create');
     }
 
-    public function store(Request $request)
+    public function store(Request $request): RedirectResponse
     {
-        $this->checkSession();
-
         $request->validate([
             'name'     => 'required|string|max:100',
             'email'    => 'required|email|unique:users,email',
             'password' => 'required|min:6|confirmed',
             'role'     => 'required|in:admin,hotel,client',
             'status'   => 'required|in:active,inactive',
-        ], [
+        ], $this->validationMessages());
+
+        User::create($request->only('name', 'email', 'password', 'role', 'status'));
+
+        return redirect()->route('accounts.index')
+            ->with('success', 'Cuenta creada exitosamente.');
+    }
+
+    public function edit(User $account): View
+    {
+        return view('accounts.edit', compact('account'));
+    }
+
+    public function update(Request $request, User $account): RedirectResponse
+    {
+        $rules = [
+            'name'   => 'required|string|max:100',
+            'email'  => "required|email|unique:users,email,{$account->id}",
+            'role'   => 'required|in:admin,hotel,client',
+            'status' => 'required|in:active,inactive',
+        ];
+
+        if ($request->filled('password')) {
+            $rules['password'] = 'min:6|confirmed';
+        }
+
+        $request->validate($rules, $this->validationMessages());
+
+        $data = $request->only('name', 'email', 'role', 'status');
+
+        if ($request->filled('password')) {
+            $data['password'] = $request->password; // cast 'hashed' lo encripta
+        }
+
+        $account->update($data);
+
+        return redirect()->route('accounts.index')
+            ->with('success', 'Cuenta actualizada correctamente.');
+    }
+
+    public function destroy(User $account): RedirectResponse
+    {
+        if ($account->is(Auth::user())) {
+            return redirect()->route('accounts.index')
+                ->with('error', 'No puedes eliminar tu propia cuenta.');
+        }
+
+        $account->delete();
+
+        return redirect()->route('accounts.index')
+            ->with('success', 'Cuenta eliminada correctamente.');
+    }
+
+    /* ── Helpers privados ───────────────────────── */
+
+    private function validationMessages(): array
+    {
+        return [
             'name.required'      => 'El nombre es obligatorio.',
             'email.required'     => 'El correo es obligatorio.',
             'email.unique'       => 'Este correo ya está registrado.',
@@ -376,80 +697,7 @@ class AccountController extends Controller
             'password.confirmed' => 'Las contraseñas no coinciden.',
             'role.required'      => 'El rol es obligatorio.',
             'status.required'    => 'El estado es obligatorio.',
-        ]);
-
-        User::create([
-            'name'     => $request->name,
-            'email'    => $request->email,
-            'password' => Hash::make($request->password),
-            'role'     => $request->role,
-            'status'   => $request->status,
-        ]);
-
-        return redirect()->route('accounts.index')->with('success', 'Cuenta creada exitosamente.');
-    }
-
-    public function edit(User $account)
-    {
-        $this->checkSession();
-        return view('accounts.edit', compact('account'));
-    }
-
-    public function update(Request $request, User $account)
-    {
-        $this->checkSession();
-
-        $rules = [
-            'name'   => 'required|string|max:100',
-            'email'  => 'required|email|unique:users,email,' . $account->id,
-            'role'   => 'required|in:admin,hotel,client',
-            'status' => 'required|in:active,inactive',
         ];
-
-        $messages = [
-            'name.required'  => 'El nombre es obligatorio.',
-            'email.required' => 'El correo es obligatorio.',
-            'email.unique'   => 'Este correo ya está registrado por otra cuenta.',
-            'role.required'  => 'El rol es obligatorio.',
-            'status.required'=> 'El estado es obligatorio.',
-        ];
-
-        // Contraseña opcional en edición
-        if ($request->filled('password')) {
-            $rules['password'] = 'min:6|confirmed';
-            $messages['password.min']       = 'La contraseña debe tener al menos 6 caracteres.';
-            $messages['password.confirmed'] = 'Las contraseñas no coinciden.';
-        }
-
-        $request->validate($rules, $messages);
-
-        $data = [
-            'name'   => $request->name,
-            'email'  => $request->email,
-            'role'   => $request->role,
-            'status' => $request->status,
-        ];
-
-        if ($request->filled('password')) {
-            $data['password'] = Hash::make($request->password);
-        }
-
-        $account->update($data);
-
-        return redirect()->route('accounts.index')->with('success', 'Cuenta actualizada correctamente.');
-    }
-
-    public function destroy(User $account)
-    {
-        $this->checkSession();
-
-        // Evitar que el admin se elimine a sí mismo
-        if ($account->id === session('user_id')) {
-            return redirect()->route('accounts.index')->with('error', 'No puedes eliminar tu propia cuenta.');
-        }
-
-        $account->delete();
-        return redirect()->route('accounts.index')->with('success', 'Cuenta eliminada correctamente.');
     }
 }
 </file>
@@ -459,23 +707,25 @@ class AccountController extends Controller
 
 namespace App\Http\Controllers;
 
-use App\Models\User;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\View\View;
 
 class AuthController extends Controller
 {
-    public function showLogin()
+    public function showLogin(): View|RedirectResponse
     {
-        // Si ya hay sesión activa, redirigir al dashboard
-        if (session()->has('user_id')) {
-            return redirect()->route('accounts.index');
+        if (Auth::check()) {
+            return redirect()->route('reservations.availability');
         }
+
         return view('auth.login');
     }
 
-    public function login(Request $request)
+    public function login(Request $request): RedirectResponse
     {
-        $request->validate([
+        $credentials = $request->validate([
             'email'    => 'required|email',
             'password' => 'required|min:6',
         ], [
@@ -485,30 +735,35 @@ class AuthController extends Controller
             'password.min'      => 'La contraseña debe tener al menos 6 caracteres.',
         ]);
 
-        $user = User::where('email', $request->email)->first();
-
-        if (!$user || !$user->verifyPassword($request->password)) {
-            return back()->withErrors(['email' => 'Credenciales incorrectas. Verifica tu correo y contraseña.'])->withInput();
+        if (! Auth::attempt($credentials)) {
+            return back()
+                ->withErrors(['email' => 'Credenciales incorrectas. Verifica tu correo y contraseña.'])
+                ->withInput();
         }
 
-        if ($user->status === 'inactive') {
-            return back()->withErrors(['email' => 'Tu cuenta está inactiva. Contacta al administrador.'])->withInput();
+        /** @var \App\Models\User $user */
+        $user = Auth::user();
+
+        if (! $user->isActive()) {
+            Auth::logout();
+            return back()
+                ->withErrors(['email' => 'Tu cuenta está inactiva. Contacta al administrador.'])
+                ->withInput();
         }
 
-        // Guardar datos en sesión
-        session([
-            'user_id'   => $user->id,
-            'user_name' => $user->name,
-            'user_role' => $user->role,
-            'user_email'=> $user->email,
-        ]);
+        $request->session()->regenerate();
 
-        return redirect()->route('accounts.index')->with('success', 'Bienvenido, ' . $user->name . '.');
+        return redirect()
+            ->intended(route('reservations.availability'))
+            ->with('success', "Bienvenido, {$user->name}.");
     }
 
-    public function logout()
+    public function logout(Request $request): RedirectResponse
     {
-        session()->flush();
+        Auth::logout();
+        $request->session()->invalidate();
+        $request->session()->regenerateToken();
+
         return redirect()->route('login')->with('success', 'Sesión cerrada correctamente.');
     }
 }
@@ -519,9 +774,11 @@ class AuthController extends Controller
 
 namespace App\Http\Controllers;
 
+use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+
 abstract class Controller
 {
-    //
+    use AuthorizesRequests;
 }
 </file>
 
@@ -533,44 +790,39 @@ namespace App\Http\Controllers;
 use App\Models\Reservation;
 use App\Models\Room;
 use App\Models\User;
+use App\Services\ReservationService;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\View\View;
 
 class ReservationController extends Controller
 {
-    private function checkSession(): void
+    public function __construct(private readonly ReservationService $service) {}
+
+    public function index(Request $request): View
     {
-        if (!session()->has('user_id')) {
-            abort(redirect()->route('login'));
-        }
-    }
+        $this->authorize('viewAny', Reservation::class);
 
-    // RF8: Listar reservas según rol
-    public function index(Request $request)
-    {
-        $this->checkSession();
-
-        $role   = session('user_role');
-        $userId = session('user_id');
-
+        /** @var \App\Models\User $user */
+        $user  = Auth::user();
         $query = Reservation::with(['room.hotel', 'client']);
 
-        if ($role === 'client') {
-            // El cliente solo ve sus propias reservas
-            $query->where('client_id', $userId);
-        } elseif ($role === 'hotel') {
-            // El hotel ve reservas de sus habitaciones
-            $query->whereHas('room', fn($q) => $q->where('hotel_id', $userId));
-        }
-        // admin ve todo
+        // Filtro por rol
+        match ($user->role) {
+            'client' => $query->where('client_id', $user->id),
+            'hotel'  => $query->whereHas('room', fn($q) => $q->where('hotel_id', $user->id)),
+            default  => null,
+        };
 
-        // Filtros
+        // Filtros opcionales
         if ($request->filled('status')) {
             $query->where('status', $request->status);
         }
-        if ($request->filled('client_id') && $role === 'admin') {
+        if ($request->filled('client_id') && $user->isAdmin()) {
             $query->where('client_id', $request->client_id);
         }
-        if ($request->filled('hotel_id') && in_array($role, ['admin'])) {
+        if ($request->filled('hotel_id') && $user->isAdmin()) {
             $query->whereHas('room', fn($q) => $q->where('hotel_id', $request->hotel_id));
         }
         if ($request->filled('from')) {
@@ -580,56 +832,48 @@ class ReservationController extends Controller
             $query->where('check_out', '<=', $request->to);
         }
 
-        $reservations = $query->orderBy('created_at', 'desc')->paginate(10)->withQueryString();
+        $reservations = $query->orderByDesc('created_at')->paginate(10)->withQueryString();
 
         $clients = User::where('role', 'client')->where('status', 'active')->get();
         $hotels  = User::where('role', 'hotel')->where('status', 'active')->get();
-
-        // Estadísticas contextuales
-        $baseQuery = Reservation::query();
-        if ($role === 'client') {
-            $baseQuery->where('client_id', $userId);
-        } elseif ($role === 'hotel') {
-            $baseQuery->whereHas('room', fn($q) => $q->where('hotel_id', $userId));
-        }
-
-        $stats = [
-            'total'     => (clone $baseQuery)->count(),
-            'pending'   => (clone $baseQuery)->where('status', 'pending')->count(),
-            'confirmed' => (clone $baseQuery)->where('status', 'confirmed')->count(),
-            'cancelled' => (clone $baseQuery)->where('status', 'cancelled')->count(),
-        ];
+        $stats   = $this->buildStats($user);
 
         return view('reservations.index', compact('reservations', 'clients', 'hotels', 'stats'));
     }
 
-    // RF8: Formulario para nueva reserva
-    public function create(Request $request)
+    public function create(Request $request): View
     {
-        $this->checkSession();
+        $this->authorize('create', Reservation::class);
 
-        // Si viene con room_id pre-seleccionado (desde disponibilidad)
-        $selectedRoom = $request->filled('room_id') ? Room::with('hotel')->find($request->room_id) : null;
-        $checkIn      = $request->check_in  ?? '';
-        $checkOut     = $request->check_out ?? '';
+        $selectedRoom = $request->filled('room_id')
+            ? Room::with('hotel')->find($request->room_id)
+            : null;
 
-        $rooms   = Room::with('hotel')->where('status', 'available')->get();
+        $rooms   = Room::with('hotel')->available()->get();
         $clients = User::where('role', 'client')->where('status', 'active')->get();
 
-        return view('reservations.create', compact('rooms', 'clients', 'selectedRoom', 'checkIn', 'checkOut'));
+        return view(
+            'reservations.create',
+            array_merge(
+                compact('rooms', 'clients', 'selectedRoom'),
+                [
+                    'checkIn'  => $request->check_in ?? '',
+                    'checkOut' => $request->check_out ?? '',
+                ]
+            )
+        );
     }
 
-    // RF8: Guardar reserva
-    public function store(Request $request)
+    public function store(Request $request): RedirectResponse
     {
-        $this->checkSession();
+        $this->authorize('create', Reservation::class);
 
-        $role    = session('user_role');
-        $userId  = session('user_id');
+        /** @var \App\Models\User $user */
+        $user = Auth::user();
 
-        // Si es cliente, el client_id siempre es él mismo
-        if ($role === 'client') {
-            $request->merge(['client_id' => $userId]);
+        // El cliente siempre reserva para sí mismo
+        if ($user->isClient()) {
+            $request->merge(['client_id' => $user->id]);
         }
 
         $request->validate([
@@ -639,63 +883,30 @@ class ReservationController extends Controller
             'check_out' => 'required|date|after:check_in',
             'guests'    => 'required|integer|min:1',
             'notes'     => 'nullable|string|max:500',
-        ], [
-            'room_id.required'   => 'Debes seleccionar una habitación.',
-            'client_id.required' => 'Debes seleccionar un cliente.',
-            'check_in.required'  => 'La fecha de entrada es obligatoria.',
-            'check_in.after_or_equal' => 'La fecha de entrada no puede ser anterior a hoy.',
-            'check_out.required' => 'La fecha de salida es obligatoria.',
-            'check_out.after'    => 'La fecha de salida debe ser posterior a la de entrada.',
-            'guests.required'    => 'El número de huéspedes es obligatorio.',
-        ]);
+        ], $this->reservationMessages());
 
-        $room = Room::findOrFail($request->room_id);
+        $client = User::findOrFail($request->client_id);
 
-        // Verificar capacidad
-        if ($request->guests > $room->capacity) {
-            return back()->withErrors(['guests' => "La habitación tiene capacidad máxima de {$room->capacity} personas."])->withInput();
-        }
+        $this->service->create($request->only(
+            'room_id', 'check_in', 'check_out', 'guests', 'notes'
+        ), $client);
 
-        // RF7: Verificar disponibilidad en fechas solicitadas
-        if (!$room->isAvailableForDates($request->check_in, $request->check_out)) {
-            return back()->withErrors(['check_in' => 'La habitación no está disponible en las fechas seleccionadas.'])->withInput();
-        }
-
-        // Calcular precio total
-        $nights     = \Carbon\Carbon::parse($request->check_in)->diffInDays($request->check_out);
-        $totalPrice = $nights * $room->price_per_night;
-
-        Reservation::create([
-            'room_id'     => $request->room_id,
-            'client_id'   => $request->client_id,
-            'check_in'    => $request->check_in,
-            'check_out'   => $request->check_out,
-            'guests'      => $request->guests,
-            'total_price' => $totalPrice,
-            'status'      => 'pending',
-            'notes'       => $request->notes,
-        ]);
-
-        // Si el cliente reserva, actualizar habitación como ocupada
-        // (solo si el hotel/admin confirma se marcaría occupied; aquí se deja en pending)
-
-        return redirect()->route('reservations.index')->with('success', 'Reserva creada exitosamente. Pendiente de confirmación.');
+        return redirect()->route('reservations.index')
+            ->with('success', 'Reserva creada exitosamente. Pendiente de confirmación.');
     }
 
-    // Ver detalle de reserva
-    public function show(Reservation $reservation)
+    public function show(Reservation $reservation): View
     {
-        $this->checkSession();
-        $this->authorizeReservation($reservation);
+        $this->authorize('view', $reservation);
+
         $reservation->load(['room.hotel', 'client']);
+
         return view('reservations.show', compact('reservation'));
     }
 
-    // Formulario de edición (solo admin y hotel)
-    public function edit(Reservation $reservation)
+    public function edit(Reservation $reservation): View
     {
-        $this->checkSession();
-        $this->authorizeReservation($reservation);
+        $this->authorize('update', $reservation);
 
         $rooms   = Room::with('hotel')->get();
         $clients = User::where('role', 'client')->where('status', 'active')->get();
@@ -704,11 +915,9 @@ class ReservationController extends Controller
         return view('reservations.edit', compact('reservation', 'rooms', 'clients'));
     }
 
-    // Actualizar reserva
-    public function update(Request $request, Reservation $reservation)
+    public function update(Request $request, Reservation $reservation): RedirectResponse
     {
-        $this->checkSession();
-        $this->authorizeReservation($reservation);
+        $this->authorize('update', $reservation);
 
         $request->validate([
             'check_in'  => 'required|date',
@@ -716,68 +925,31 @@ class ReservationController extends Controller
             'guests'    => 'required|integer|min:1',
             'status'    => 'required|in:pending,confirmed,cancelled,completed',
             'notes'     => 'nullable|string|max:500',
-        ], [
-            'check_in.required'  => 'La fecha de entrada es obligatoria.',
-            'check_out.required' => 'La fecha de salida es obligatoria.',
-            'check_out.after'    => 'La salida debe ser posterior a la entrada.',
-            'guests.required'    => 'El número de huéspedes es obligatorio.',
-            'status.required'    => 'El estado es obligatorio.',
-        ]);
+        ], $this->reservationMessages());
 
-        // Verificar disponibilidad si cambiaron las fechas
-        if ($reservation->check_in->format('Y-m-d') !== $request->check_in ||
-            $reservation->check_out->format('Y-m-d') !== $request->check_out) {
-            if (!$reservation->room->isAvailableForDates($request->check_in, $request->check_out, $reservation->id)) {
-                return back()->withErrors(['check_in' => 'La habitación no está disponible en las nuevas fechas.'])->withInput();
-            }
-        }
+        $this->service->update($reservation, $request->only(
+            'check_in', 'check_out', 'guests', 'status', 'notes'
+        ));
 
-        $nights     = \Carbon\Carbon::parse($request->check_in)->diffInDays($request->check_out);
-        $totalPrice = $nights * $reservation->room->price_per_night;
-
-        $reservation->update([
-            'check_in'    => $request->check_in,
-            'check_out'   => $request->check_out,
-            'guests'      => $request->guests,
-            'total_price' => $totalPrice,
-            'status'      => $request->status,
-            'notes'       => $request->notes,
-        ]);
-
-        // Sincronizar estado de habitación
-        if ($request->status === 'confirmed') {
-            $reservation->room->update(['status' => 'occupied']);
-        } elseif (in_array($request->status, ['cancelled', 'completed'])) {
-            $reservation->room->update(['status' => 'available']);
-        }
-
-        return redirect()->route('reservations.index')->with('success', 'Reserva actualizada correctamente.');
+        return redirect()->route('reservations.index')
+            ->with('success', 'Reserva actualizada correctamente.');
     }
 
-    // Cancelar reserva
-    public function destroy(Reservation $reservation)
+    public function destroy(Reservation $reservation): RedirectResponse
     {
-        $this->checkSession();
-        $this->authorizeReservation($reservation);
+        $this->authorize('delete', $reservation);
 
-        if (in_array($reservation->status, ['completed'])) {
-            return redirect()->route('reservations.index')
-                ->with('error', 'No se puede cancelar una reserva ya completada.');
-        }
+        $this->service->cancel($reservation);
 
-        $reservation->update(['status' => 'cancelled']);
-        $reservation->room->update(['status' => 'available']);
-
-        return redirect()->route('reservations.index')->with('success', 'Reserva cancelada correctamente.');
+        return redirect()->route('reservations.index')
+            ->with('success', 'Reserva cancelada correctamente.');
     }
 
-    // RF7: Consultar disponibilidad pública
-    public function availability(Request $request)
+    public function availability(Request $request): View
     {
-        $this->checkSession();
+        $rooms  = collect();
+        $hotels = User::where('role', 'hotel')->where('status', 'active')->get();
 
-        $rooms   = collect();
-        $hotels  = User::where('role', 'hotel')->where('status', 'active')->get();
         $checkIn  = $request->check_in  ?? '';
         $checkOut = $request->check_out ?? '';
 
@@ -792,45 +964,51 @@ class ReservationController extends Controller
 
             $query = Room::with('hotel')->where('status', '!=', 'maintenance');
 
-            if ($request->filled('hotel_id')) {
-                $query->where('hotel_id', $request->hotel_id);
-            }
-            if ($request->filled('capacity')) {
-                $query->where('capacity', '>=', $request->capacity);
-            }
-            if ($request->filled('type')) {
-                $query->where('type', $request->type);
-            }
-            if ($request->filled('max_price')) {
-                $query->where('price_per_night', '<=', $request->max_price);
-            }
+            if ($request->filled('hotel_id'))  $query->where('hotel_id', $request->hotel_id);
+            if ($request->filled('capacity'))  $query->where('capacity', '>=', $request->capacity);
+            if ($request->filled('type'))      $query->where('type', $request->type);
+            if ($request->filled('max_price')) $query->where('price_per_night', '<=', $request->max_price);
 
-            $allRooms = $query->get();
-
-            // Filtrar por disponibilidad real en las fechas
-            $rooms = $allRooms->filter(
-                fn($room) => $room->isAvailableForDates($request->check_in, $request->check_out)
+            $rooms = $query->get()->filter(
+                fn(Room $room) => $room->isAvailableForDates($checkIn, $checkOut)
             );
         }
 
         return view('reservations.availability', compact('rooms', 'hotels', 'checkIn', 'checkOut'));
     }
 
-    private function authorizeReservation(Reservation $reservation): void
+    /* ── Helpers privados ───────────────────────── */
+
+    private function buildStats(User $user): array
     {
-        $role   = session('user_role');
-        $userId = session('user_id');
+        $base = Reservation::query();
 
-        if ($role === 'client' && $reservation->client_id !== $userId) {
-            abort(403, 'No tienes permiso para ver esta reserva.');
-        }
+        match ($user->role) {
+            'client' => $base->where('client_id', $user->id),
+            'hotel'  => $base->whereHas('room', fn($q) => $q->where('hotel_id', $user->id)),
+            default  => null,
+        };
 
-        if ($role === 'hotel') {
-            $reservation->load('room');
-            if ($reservation->room->hotel_id !== $userId) {
-                abort(403, 'No tienes permiso para gestionar esta reserva.');
-            }
-        }
+        return [
+            'total'     => (clone $base)->count(),
+            'pending'   => (clone $base)->where('status', 'pending')->count(),
+            'confirmed' => (clone $base)->where('status', 'confirmed')->count(),
+            'cancelled' => (clone $base)->where('status', 'cancelled')->count(),
+        ];
+    }
+
+    private function reservationMessages(): array
+    {
+        return [
+            'room_id.required'        => 'Debes seleccionar una habitación.',
+            'client_id.required'      => 'Debes seleccionar un cliente.',
+            'check_in.required'       => 'La fecha de entrada es obligatoria.',
+            'check_in.after_or_equal' => 'La fecha de entrada no puede ser anterior a hoy.',
+            'check_out.required'      => 'La fecha de salida es obligatoria.',
+            'check_out.after'         => 'La fecha de salida debe ser posterior a la de entrada.',
+            'guests.required'         => 'El número de huéspedes es obligatorio.',
+            'status.required'         => 'El estado es obligatorio.',
+        ];
     }
 }
 </file>
@@ -842,34 +1020,26 @@ namespace App\Http\Controllers;
 
 use App\Models\Room;
 use App\Models\User;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\View\View;
 
 class RoomController extends Controller
 {
-    private function checkSession(): void
+    public function index(Request $request): View
     {
-        if (!session()->has('user_id')) {
-            abort(redirect()->route('login'));
-        }
-    }
+        $this->authorize('viewAny', Room::class);
 
-    // RF4, RF7: Listar habitaciones con filtros y disponibilidad
-    public function index(Request $request)
-    {
-        $this->checkSession();
-
-        $role    = session('user_role');
-        $userId  = session('user_id');
-
+        /** @var \App\Models\User $user */
+        $user  = Auth::user();
         $query = Room::with('hotel');
 
-        // Hotel solo ve sus propias habitaciones
-        if ($role === 'hotel') {
-            $query->where('hotel_id', $userId);
+        if ($user->isHotel()) {
+            $query->forHotel($user->id);
         }
 
-        // Filtros
-        if ($request->filled('hotel_id') && $role === 'admin') {
+        if ($request->filled('hotel_id') && $user->isAdmin()) {
             $query->where('hotel_id', $request->hotel_id);
         }
         if ($request->filled('type')) {
@@ -885,130 +1055,104 @@ class RoomController extends Controller
             $query->where('capacity', '>=', $request->capacity);
         }
 
-        $rooms  = $query->orderBy('created_at', 'desc')->paginate(10)->withQueryString();
+        $rooms  = $query->orderByDesc('created_at')->paginate(10)->withQueryString();
         $hotels = User::where('role', 'hotel')->where('status', 'active')->get();
-
-        $stats = [
-            'total'       => ($role === 'hotel') ? Room::where('hotel_id', $userId)->count() : Room::count(),
-            'available'   => ($role === 'hotel') ? Room::where('hotel_id', $userId)->where('status', 'available')->count()   : Room::where('status', 'available')->count(),
-            'occupied'    => ($role === 'hotel') ? Room::where('hotel_id', $userId)->where('status', 'occupied')->count()    : Room::where('status', 'occupied')->count(),
-            'maintenance' => ($role === 'hotel') ? Room::where('hotel_id', $userId)->where('status', 'maintenance')->count() : Room::where('status', 'maintenance')->count(),
-        ];
+        $stats  = $this->buildStats($user);
 
         return view('rooms.index', compact('rooms', 'hotels', 'stats'));
     }
 
-    // RF4: Formulario de registro de habitación
-    public function create()
+    public function create(): View
     {
-        $this->checkSession();
-        $role   = session('user_role');
-        $hotels = ($role === 'admin') ? User::where('role', 'hotel')->where('status', 'active')->get() : collect();
+        $this->authorize('create', Room::class);
+
+        $hotels = Auth::user()->isAdmin()
+            ? User::where('role', 'hotel')->where('status', 'active')->get()
+            : collect();
+
         return view('rooms.create', compact('hotels'));
     }
 
-    // RF4: Registrar habitación
-    public function store(Request $request)
+    public function store(Request $request): RedirectResponse
     {
-        $this->checkSession();
+        $this->authorize('create', Room::class);
 
-        $hotelId = (session('user_role') === 'hotel')
-            ? session('user_id')
-            : $request->hotel_id;
+        /** @var \App\Models\User $user */
+        $user    = Auth::user();
+        $hotelId = $user->isHotel() ? $user->id : $request->hotel_id;
 
         $request->merge(['hotel_id' => $hotelId]);
+        $request->validate($this->roomRules(), $this->roomMessages());
 
-        $request->validate([
-            'hotel_id'        => 'required|exists:users,id',
-            'number'          => 'required|string|max:20',
-            'type'            => 'required|in:single,double,suite,family,deluxe',
-            'description'     => 'nullable|string|max:500',
-            'price_per_night' => 'required|numeric|min:1',
-            'capacity'        => 'required|integer|min:1|max:20',
-            'status'          => 'required|in:available,occupied,maintenance',
-        ], $this->messages());
+        $duplicate = Room::where('hotel_id', $hotelId)
+            ->where('number', $request->number)
+            ->exists();
 
-        // Verificar número único por hotel
-        $exists = Room::where('hotel_id', $hotelId)->where('number', $request->number)->exists();
-        if ($exists) {
-            return back()->withErrors(['number' => 'Ya existe una habitación con ese número en este hotel.'])->withInput();
+        if ($duplicate) {
+            return back()
+                ->withErrors(['number' => 'Ya existe una habitación con ese número en este hotel.'])
+                ->withInput();
         }
 
-        Room::create([
-            'hotel_id'        => $hotelId,
-            'number'          => $request->number,
-            'type'            => $request->type,
-            'description'     => $request->description,
-            'price_per_night' => $request->price_per_night,
-            'capacity'        => $request->capacity,
-            'status'          => $request->status,
-        ]);
+        Room::create($request->only(
+            'hotel_id', 'number', 'type', 'description', 'price_per_night', 'capacity', 'status'
+        ));
 
-        return redirect()->route('rooms.index')->with('success', 'Habitación registrada correctamente.');
+        return redirect()->route('rooms.index')
+            ->with('success', 'Habitación registrada correctamente.');
     }
 
-    // RF5: Formulario de edición
-    public function edit(Room $room)
+    public function edit(Room $room): View
     {
-        $this->checkSession();
-        $this->authorizeRoom($room);
+        $this->authorize('update', $room);
+
         $hotels = User::where('role', 'hotel')->where('status', 'active')->get();
+
         return view('rooms.edit', compact('room', 'hotels'));
     }
 
-    // RF5: Actualizar habitación
-    public function update(Request $request, Room $room)
+    public function update(Request $request, Room $room): RedirectResponse
     {
-        $this->checkSession();
-        $this->authorizeRoom($room);
+        $this->authorize('update', $room);
 
-        $request->validate([
-            'number'          => 'required|string|max:20',
-            'type'            => 'required|in:single,double,suite,family,deluxe',
-            'description'     => 'nullable|string|max:500',
-            'price_per_night' => 'required|numeric|min:1',
-            'capacity'        => 'required|integer|min:1|max:20',
-            'status'          => 'required|in:available,occupied,maintenance',
-        ], $this->messages());
+        $request->validate(
+            array_diff_key($this->roomRules(), ['hotel_id' => '']),
+            $this->roomMessages()
+        );
 
-        // Número único por hotel (excluyendo la actual)
-        $exists = Room::where('hotel_id', $room->hotel_id)
+        $duplicate = Room::where('hotel_id', $room->hotel_id)
             ->where('number', $request->number)
             ->where('id', '!=', $room->id)
             ->exists();
-        if ($exists) {
-            return back()->withErrors(['number' => 'Ya existe otra habitación con ese número en este hotel.'])->withInput();
+
+        if ($duplicate) {
+            return back()
+                ->withErrors(['number' => 'Ya existe otra habitación con ese número en este hotel.'])
+                ->withInput();
         }
 
-        $room->update([
-            'number'          => $request->number,
-            'type'            => $request->type,
-            'description'     => $request->description,
-            'price_per_night' => $request->price_per_night,
-            'capacity'        => $request->capacity,
-            'status'          => $request->status,
-        ]);
+        $room->update($request->only(
+            'number', 'type', 'description', 'price_per_night', 'capacity', 'status'
+        ));
 
-        return redirect()->route('rooms.index')->with('success', 'Habitación actualizada correctamente.');
+        return redirect()->route('rooms.index')
+            ->with('success', 'Habitación actualizada correctamente.');
     }
 
-    // RF6: Cambiar estado rápido (AJAX-friendly)
-    public function updateStatus(Request $request, Room $room)
+    public function updateStatus(Request $request, Room $room): RedirectResponse
     {
-        $this->checkSession();
-        $this->authorizeRoom($room);
+        $this->authorize('update', $room);
 
         $request->validate(['status' => 'required|in:available,occupied,maintenance']);
+
         $room->update(['status' => $request->status]);
 
-        return redirect()->back()->with('success', 'Estado de la habitación actualizado.');
+        return back()->with('success', 'Estado de la habitación actualizado.');
     }
 
-    // Eliminar habitación
-    public function destroy(Room $room)
+    public function destroy(Room $room): RedirectResponse
     {
-        $this->checkSession();
-        $this->authorizeRoom($room);
+        $this->authorize('delete', $room);
 
         if ($room->reservations()->whereIn('status', ['pending', 'confirmed'])->exists()) {
             return redirect()->route('rooms.index')
@@ -1016,18 +1160,43 @@ class RoomController extends Controller
         }
 
         $room->delete();
-        return redirect()->route('rooms.index')->with('success', 'Habitación eliminada correctamente.');
+
+        return redirect()->route('rooms.index')
+            ->with('success', 'Habitación eliminada correctamente.');
     }
 
-    // Protege que un hotel no edite habitaciones ajenas
-    private function authorizeRoom(Room $room): void
+    /* ── Helpers privados ───────────────────────── */
+
+    private function buildStats(User $user): array
     {
-        if (session('user_role') === 'hotel' && $room->hotel_id !== session('user_id')) {
-            abort(403, 'No tienes permiso para gestionar esta habitación.');
+        $base = Room::query();
+
+        if ($user->isHotel()) {
+            $base->forHotel($user->id);
         }
+
+        return [
+            'total'       => (clone $base)->count(),
+            'available'   => (clone $base)->where('status', 'available')->count(),
+            'occupied'    => (clone $base)->where('status', 'occupied')->count(),
+            'maintenance' => (clone $base)->where('status', 'maintenance')->count(),
+        ];
     }
 
-    private function messages(): array
+    private function roomRules(): array
+    {
+        return [
+            'hotel_id'        => 'required|exists:users,id',
+            'number'          => 'required|string|max:20',
+            'type'            => 'required|in:single,double,suite,family,deluxe',
+            'description'     => 'nullable|string|max:500',
+            'price_per_night' => 'required|numeric|min:1',
+            'capacity'        => 'required|integer|min:1|max:20',
+            'status'          => 'required|in:available,occupied,maintenance',
+        ];
+    }
+
+    private function roomMessages(): array
     {
         return [
             'hotel_id.required'        => 'Debes seleccionar un hotel.',
@@ -1050,9 +1219,9 @@ class RoomController extends Controller
 
 namespace App\Models;
 
+use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Carbon\Carbon;
 
 class Reservation extends Model
 {
@@ -1087,6 +1256,11 @@ class Reservation extends Model
 
     /* ── Accessors ──────────────────────────────── */
 
+    public function getNightsAttribute(): int
+    {
+        return $this->check_in->diffInDays($this->check_out);
+    }
+
     public function getStatusLabelAttribute(): string
     {
         return match ($this->status) {
@@ -1109,9 +1283,16 @@ class Reservation extends Model
         };
     }
 
-    public function getNightsAttribute(): int
+    /* ── Helpers de estado ──────────────────────── */
+
+    public function isCancellable(): bool
     {
-        return $this->check_in->diffInDays($this->check_out);
+        return ! in_array($this->status, ['completed', 'cancelled']);
+    }
+
+    public function isEditable(): bool
+    {
+        return ! in_array($this->status, ['completed', 'cancelled']);
     }
 }
 </file>
@@ -1154,17 +1335,29 @@ class Room extends Model
         return $this->hasMany(Reservation::class);
     }
 
+    /* ── Scopes ─────────────────────────────────── */
+
+    public function scopeAvailable($query)
+    {
+        return $query->where('status', 'available');
+    }
+
+    public function scopeForHotel($query, int $hotelId)
+    {
+        return $query->where('hotel_id', $hotelId);
+    }
+
     /* ── Accessors ──────────────────────────────── */
 
     public function getTypeLabelAttribute(): string
     {
         return match ($this->type) {
-            'single'  => 'Sencilla',
-            'double'  => 'Doble',
-            'suite'   => 'Suite',
-            'family'  => 'Familiar',
-            'deluxe'  => 'Deluxe',
-            default   => ucfirst($this->type),
+            'single' => 'Sencilla',
+            'double' => 'Doble',
+            'suite'  => 'Suite',
+            'family' => 'Familiar',
+            'deluxe' => 'Deluxe',
+            default  => ucfirst($this->type),
         };
     }
 
@@ -1188,35 +1381,28 @@ class Room extends Model
         };
     }
 
-    /* ── Scopes ─────────────────────────────────── */
-
-    public function scopeAvailable($query)
-    {
-        return $query->where('status', 'available');
-    }
+    /* ── Lógica de dominio ──────────────────────── */
 
     /**
-     * Verifica si la habitación está libre en un rango de fechas
-     * (excluye reservas canceladas; opcionalmente excluye una reserva al editar)
+     * Verifica si la habitación está libre en un rango de fechas.
+     * Cubre todos los casos de solapamiento (parcial, completo, exacto).
+     * Excluye reservas canceladas y opcionalmente una reserva al editar.
      */
-    public function isAvailableForDates(string $checkIn, string $checkOut, ?int $excludeReservationId = null): bool
-    {
+    public function isAvailableForDates(
+        string $checkIn,
+        string $checkOut,
+        ?int $excludeReservationId = null
+    ): bool {
         $query = $this->reservations()
             ->whereNotIn('status', ['cancelled'])
-            ->where(function ($q) use ($checkIn, $checkOut) {
-                $q->whereBetween('check_in',  [$checkIn, $checkOut])
-                  ->orWhereBetween('check_out', [$checkIn, $checkOut])
-                  ->orWhere(function ($q2) use ($checkIn, $checkOut) {
-                      $q2->where('check_in',  '<=', $checkIn)
-                         ->where('check_out', '>=', $checkOut);
-                  });
-            });
+            ->where('check_in', '<', $checkOut)
+            ->where('check_out', '>', $checkIn);
 
-        if ($excludeReservationId) {
+        if ($excludeReservationId !== null) {
             $query->where('id', '!=', $excludeReservationId);
         }
 
-        return $query->count() === 0;
+        return $query->doesntExist();
     }
 }
 </file>
@@ -1226,24 +1412,33 @@ class Room extends Model
 
 namespace App\Providers;
 
+use App\Models\Reservation;
+use App\Models\Room;
+use App\Policies\ReservationPolicy;
+use App\Policies\RoomPolicy;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
 {
-    /**
-     * Register any application services.
-     */
     public function register(): void
     {
         //
     }
 
-    /**
-     * Bootstrap any application services.
-     */
     public function boot(): void
     {
-        //
+        // Registrar policies explícitamente
+        // (Laravel también las detecta por convención App\Models\X → App\Policies\XPolicy)
+        Gate::policy(Room::class, RoomPolicy::class);
+        Gate::policy(Reservation::class, ReservationPolicy::class);
+
+        // Los admin bypasean todos los gates
+        Gate::before(function ($user) {
+            if ($user->isAdmin()) {
+                return true;
+            }
+        });
     }
 }
 </file>
@@ -1272,22 +1467,29 @@ exit($status);
 <file path="bootstrap/app.php">
 <?php
 
+use App\Http\Middleware\Authenticate;
+use App\Http\Middleware\EnsureRole;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
-        web: __DIR__.'/../routes/web.php',
-        commands: __DIR__.'/../routes/console.php',
-        health: '/up',
+        web:      __DIR__ . '/../routes/web.php',
+        commands: __DIR__ . '/../routes/console.php',
+        health:   '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        // Registrar alias para usar en rutas
+        $middleware->alias([
+            'auth' => Authenticate::class,
+            'role' => EnsureRole::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //
-    })->create();
+    })
+    ->create();
 </file>
 
 <file path="bootstrap/cache/.gitignore">
@@ -2934,6 +3136,40 @@ return new class extends Migration
     public function down(): void
     {
         Schema::dropIfExists('reservations');
+    }
+};
+</file>
+
+<file path="database/migrations/2026_06_02_171108_create_sessions_table.php">
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    /**
+     * Run the migrations.
+     */
+    public function up(): void
+    {
+        Schema::create('sessions', function (Blueprint $table) {
+            $table->string('id')->primary();
+            $table->foreignId('user_id')->nullable()->index();
+            $table->string('ip_address', 45)->nullable();
+            $table->text('user_agent')->nullable();
+            $table->longText('payload');
+            $table->integer('last_activity')->index();
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     */
+    public function down(): void
+    {
+        Schema::dropIfExists('sessions');
     }
 };
 </file>
@@ -5154,14 +5390,21 @@ export default defineConfig({
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Support\Facades\Hash;
+use Illuminate\Foundation\Auth\User as Authenticatable;
 
-class User extends Model
+class User extends Authenticatable
 {
     protected $fillable = ['name', 'email', 'password', 'role', 'status'];
-    protected $hidden   = ['password'];
+
+    protected $hidden = ['password', 'remember_token'];
+
+    protected $casts = [
+        'email_verified_at' => 'datetime',
+        'password'          => 'hashed',
+    ];
+
+    /* ── Relaciones ─────────────────────────────── */
 
     public function rooms(): HasMany
     {
@@ -5172,6 +5415,30 @@ class User extends Model
     {
         return $this->hasMany(Reservation::class, 'client_id');
     }
+
+    /* ── Helpers de rol ─────────────────────────── */
+
+    public function isAdmin(): bool
+    {
+        return $this->role === 'admin';
+    }
+
+    public function isHotel(): bool
+    {
+        return $this->role === 'hotel';
+    }
+
+    public function isClient(): bool
+    {
+        return $this->role === 'client';
+    }
+
+    public function isActive(): bool
+    {
+        return $this->status === 'active';
+    }
+
+    /* ── Accessors ──────────────────────────────── */
 
     public function getRoleLabelAttribute(): string
     {
@@ -5201,11 +5468,6 @@ class User extends Model
     public function getStatusBadgeAttribute(): string
     {
         return $this->status === 'active' ? 'success' : 'secondary';
-    }
-
-    public function verifyPassword(string $password): bool
-    {
-        return Hash::check($password, $this->password);
     }
 }
 </file>
@@ -5351,12 +5613,14 @@ class DatabaseSeeder extends Seeder
         </a>
         <div class="ms-auto d-flex align-items-center gap-3">
             <span class="text-white-50 small d-none d-md-inline">
-                <i class="bi bi-person-circle me-1"></i>{{ session('user_name') }}
-                <span class="badge bg-white text-primary ms-1">{{ session('user_role') === 'admin' ? 'Admin' : (session('user_role') === 'hotel' ? 'Hotel' : 'Cliente') }}</span>
+                <i class="bi bi-person-circle me-1"></i>{{ Auth::user()->name }}
+                <span class="badge bg-white text-primary ms-1">{{ Auth::user()->role_label }}</span>
             </span>
             <form action="{{ route('logout') }}" method="POST" class="mb-0">
                 @csrf
-                <button class="btn btn-outline-light btn-sm"><i class="bi bi-box-arrow-right me-1"></i>Salir</button>
+                <button class="btn btn-outline-light btn-sm">
+                    <i class="bi bi-box-arrow-right me-1"></i>Salir
+                </button>
             </form>
         </div>
     </div>
@@ -5368,39 +5632,46 @@ class DatabaseSeeder extends Seeder
 
             {{-- Disponibilidad: todos la ven --}}
             <div class="nav-section">Búsqueda</div>
-            <a href="{{ route('reservations.availability') }}" class="nav-link {{ request()->routeIs('reservations.availability') ? 'active' : '' }}">
+            <a href="{{ route('reservations.availability') }}"
+               class="nav-link {{ request()->routeIs('reservations.availability') ? 'active' : '' }}">
                 <i class="bi bi-search"></i> Disponibilidad
             </a>
 
-            {{-- Reservas: admin, hotel y cliente --}}
+            {{-- Reservas: todos los roles --}}
             <div class="nav-section">Reservas</div>
-            <a href="{{ route('reservations.index') }}" class="nav-link {{ request()->routeIs('reservations.index','reservations.show','reservations.edit') ? 'active' : '' }}">
+            <a href="{{ route('reservations.index') }}"
+               class="nav-link {{ request()->routeIs('reservations.index','reservations.show','reservations.edit') ? 'active' : '' }}">
                 <i class="bi bi-calendar-check"></i> Reservas
             </a>
-            @if(in_array(session('user_role'), ['admin','client']))
-            <a href="{{ route('reservations.create') }}" class="nav-link {{ request()->routeIs('reservations.create') ? 'active' : '' }}">
+            @if(Auth::user()->isAdmin() || Auth::user()->isClient())
+            <a href="{{ route('reservations.create') }}"
+               class="nav-link {{ request()->routeIs('reservations.create') ? 'active' : '' }}">
                 <i class="bi bi-plus-circle"></i> Nueva reserva
             </a>
             @endif
 
             {{-- Habitaciones: admin y hotel --}}
-            @if(in_array(session('user_role'), ['admin','hotel']))
+            @if(Auth::user()->isAdmin() || Auth::user()->isHotel())
             <div class="nav-section">Habitaciones</div>
-            <a href="{{ route('rooms.index') }}" class="nav-link {{ request()->routeIs('rooms.index','rooms.edit') ? 'active' : '' }}">
+            <a href="{{ route('rooms.index') }}"
+               class="nav-link {{ request()->routeIs('rooms.index','rooms.edit') ? 'active' : '' }}">
                 <i class="bi bi-door-open"></i> Habitaciones
             </a>
-            <a href="{{ route('rooms.create') }}" class="nav-link {{ request()->routeIs('rooms.create') ? 'active' : '' }}">
+            <a href="{{ route('rooms.create') }}"
+               class="nav-link {{ request()->routeIs('rooms.create') ? 'active' : '' }}">
                 <i class="bi bi-plus-circle"></i> Nueva habitación
             </a>
             @endif
 
             {{-- Cuentas: solo admin --}}
-            @if(session('user_role') === 'admin')
+            @if(Auth::user()->isAdmin())
             <div class="nav-section">Administración</div>
-            <a href="{{ route('accounts.index') }}" class="nav-link {{ request()->routeIs('accounts.*') ? 'active' : '' }}">
+            <a href="{{ route('accounts.index') }}"
+               class="nav-link {{ request()->routeIs('accounts.*') ? 'active' : '' }}">
                 <i class="bi bi-people"></i> Cuentas
             </a>
             @endif
+
         </div>
     </div>
 
@@ -5431,31 +5702,43 @@ class DatabaseSeeder extends Seeder
 <file path="routes/web.php">
 <?php
 
-use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\AuthController;
 use App\Http\Controllers\AccountController;
-use App\Http\Controllers\RoomController;
+use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ReservationController;
+use App\Http\Controllers\RoomController;
+use Illuminate\Support\Facades\Route;
+
+/* ── Rutas públicas ──────────────────────────────────────────────────── */
 
 Route::get('/', fn() => redirect()->route('login'));
 
-// Autenticación
-Route::get('/login',  [AuthController::class, 'showLogin'])->name('login');
-Route::post('/login', [AuthController::class, 'login'])->name('login.post');
-Route::post('/logout',[AuthController::class, 'logout'])->name('logout');
+Route::get('/login',   [AuthController::class, 'showLogin'])->name('login');
+Route::post('/login',  [AuthController::class, 'login'])->name('login.post');
+Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
 
-// CRUD de cuentas
-Route::resource('accounts', AccountController::class);
+/* ── Rutas protegidas (requieren sesión activa) ───────────────────────── */
 
-// CRUD de habitaciones + cambio de estado rápido
-Route::resource('rooms', RoomController::class);
-Route::patch('rooms/{room}/status', [RoomController::class, 'updateStatus'])->name('rooms.status');
+Route::middleware('auth')->group(function () {
 
-// Disponibilidad (RF7) – debe ir ANTES del resource para no colisionar
-Route::get('reservations/availability', [ReservationController::class, 'availability'])->name('reservations.availability');
+    // Disponibilidad: todos los roles
+    Route::get('reservations/availability', [ReservationController::class, 'availability'])
+        ->name('reservations.availability');
 
-// CRUD de reservas
-Route::resource('reservations', ReservationController::class);
+    // Reservas: todos los roles
+    Route::resource('reservations', ReservationController::class);
+
+    // Habitaciones: admin y hotel
+    Route::middleware('role:admin,hotel')->group(function () {
+        Route::resource('rooms', RoomController::class);
+        Route::patch('rooms/{room}/status', [RoomController::class, 'updateStatus'])
+            ->name('rooms.status');
+    });
+
+    // Cuentas: solo admin
+    Route::middleware('role:admin')->group(function () {
+        Route::resource('accounts', AccountController::class);
+    });
+});
 </file>
 
 <file path="README.md">

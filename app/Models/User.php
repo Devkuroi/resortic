@@ -2,14 +2,21 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Support\Facades\Hash;
+use Illuminate\Foundation\Auth\User as Authenticatable;
 
-class User extends Model
+class User extends Authenticatable
 {
     protected $fillable = ['name', 'email', 'password', 'role', 'status'];
-    protected $hidden   = ['password'];
+
+    protected $hidden = ['password', 'remember_token'];
+
+    protected $casts = [
+        'email_verified_at' => 'datetime',
+        'password'          => 'hashed',
+    ];
+
+    /* ── Relaciones ─────────────────────────────── */
 
     public function rooms(): HasMany
     {
@@ -20,6 +27,30 @@ class User extends Model
     {
         return $this->hasMany(Reservation::class, 'client_id');
     }
+
+    /* ── Helpers de rol ─────────────────────────── */
+
+    public function isAdmin(): bool
+    {
+        return $this->role === 'admin';
+    }
+
+    public function isHotel(): bool
+    {
+        return $this->role === 'hotel';
+    }
+
+    public function isClient(): bool
+    {
+        return $this->role === 'client';
+    }
+
+    public function isActive(): bool
+    {
+        return $this->status === 'active';
+    }
+
+    /* ── Accessors ──────────────────────────────── */
 
     public function getRoleLabelAttribute(): string
     {
@@ -49,10 +80,5 @@ class User extends Model
     public function getStatusBadgeAttribute(): string
     {
         return $this->status === 'active' ? 'success' : 'secondary';
-    }
-
-    public function verifyPassword(string $password): bool
-    {
-        return Hash::check($password, $this->password);
     }
 }
